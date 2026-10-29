@@ -1,0 +1,255 @@
+{
+  "log_with_bot_id": {
+    "description": "日志区分机器人实例",
+    "type": "bool",
+    "default": false,
+    "hint": "多 Bot 时日志前缀带平台 ID，便于定位。"
+  },
+  "basic_settings": {
+    "description": "基础设置",
+    "type": "object",
+    "items": {
+      "collect_enabled": {
+        "description": "收集表情",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后不再收新表情，队列里的会跑完。"
+      },
+      "collect_all_images": {
+        "description": "收全部图片",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后跳过表情判定，群里所有图片都收（包括普通照片）；关闭时只收被判定为表情的。这一项依赖上面的「收集表情」，总开关关掉时它也不生效。"
+      }
+    }
+  },
+  "collect_settings": {
+    "description": "收集与并发",
+    "type": "object",
+    "items": {
+      "throttle_mode": {
+        "description": "判定方式",
+        "type": "string",
+        "options": [
+          "ratio",
+          "cooldown"
+        ],
+        "default": "ratio",
+        "hint": "ratio：概率；cooldown：冷却，两次收集将隔一段时间。"
+      },
+      "collect_ratio": {
+        "description": "概率",
+        "type": "float",
+        "default": 0.3,
+        "hint": "每张合格图片被收下的概率。",
+        "condition": {
+          "throttle_mode": "ratio"
+        }
+      },
+      "cooldown_seconds": {
+        "description": "冷却间隔（秒）",
+        "type": "int",
+        "default": 30,
+        "hint": "两次收集之间至少隔多久。",
+        "condition": {
+          "throttle_mode": "cooldown"
+        }
+      },
+      "queue_capacity": {
+        "description": "排队上限",
+        "type": "int",
+        "default": 32,
+        "hint": "排满会丢弃新图片，不阻塞聊天。"
+      },
+      "worker_count": {
+        "description": "并发数",
+        "type": "int",
+        "default": 2,
+        "hint": "同时处理几张图，调大更快也更吃资源。"
+      },
+      "max_file_mb": {
+        "description": "单张体积上限（MB）",
+        "type": "float",
+        "default": 32,
+        "hint": "超过直接跳过。可以填小数，比如 0.5 表示 512 KB。"
+      },
+      "max_pixels_mp": {
+        "description": "单张像素上限（百万）",
+        "type": "int",
+        "default": 40,
+        "hint": "防止超大长图占用内存。"
+      },
+      "collect_blacklist": {
+        "type": "list",
+        "description": "收集黑名单",
+        "hint": "这些会话里的图片不收。格式同发送白名单：F:QQ号 只对私聊生效，G:群号 只对群聊生效。",
+        "default": []
+      }
+    }
+  },
+  "classify_settings": {
+    "description": "识别与入库",
+    "type": "object",
+    "items": {
+      "vision_provider_id": {
+        "description": "识别模型",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "留空用全局图片描述模型；都没有时只入库、不打标签。"
+      },
+      "review_enabled": {
+        "description": "开启审核",
+        "type": "bool",
+        "default": true,
+        "hint": "新表情先进入待审核，点通过后才发得出去；关闭则收到就能用。"
+      },
+      "library_cap": {
+        "description": "存储上限",
+        "type": "int",
+        "default": 800,
+        "hint": "满了先淘汰用得最少的；收藏和导入的不会淘汰。"
+      }
+    }
+  },
+  "send_settings": {
+    "description": "发表情",
+    "type": "object",
+    "items": {
+      "send_enabled": {
+        "description": "自动发表情",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后不再自动发表情；模型仍可通过工具主动发（需开启下面的「主动发送工具」）。"
+      },
+      "send_tools_enabled": {
+        "type": "bool",
+        "description": "主动发送工具",
+        "hint": "把「搜表情」和「发表情」两个工具交给模型，让它能自己挑图发。关掉后模型看不到这两个工具，只剩自动触发那条路。",
+        "default": true
+      },
+      "send_ratio": {
+        "description": "发送概率",
+        "type": "float",
+        "default": 0.25,
+        "hint": "其它条件满足后，按这个概率发出去。"
+      },
+      "send_delay_seconds": {
+        "description": "发送延迟（秒）",
+        "type": "int",
+        "default": 5,
+        "hint": "回复发出后等几秒再发表情。设 0 表示立刻发。"
+      },
+      "send_cooldown_seconds": {
+        "description": "会话冷却（秒）",
+        "type": "int",
+        "default": 120,
+        "hint": "同一会话两次发表情的最小间隔，0 不限制。"
+      },
+      "send_compress": {
+        "description": "发送前压缩",
+        "type": "bool",
+        "default": true,
+        "hint": "压成表情包的尺寸和体积再发，原图仍保留。"
+      },
+      "send_max_side": {
+        "description": "压缩长边（像素）",
+        "type": "int",
+        "default": 512,
+        "hint": "240 到 512 就够，越小越省流量。 上面的「发送前压缩」关掉时这一项不生效。",
+        "condition": {
+          "send_compress": true
+        }
+      },
+      "send_max_kb": {
+        "description": "压缩体积上限（KB）",
+        "type": "float",
+        "default": 512,
+        "hint": "原图已经小于它就直接发原图；压不下去也发原图。可以填小数。 上面的「发送前压缩」关掉时这一项不生效。",
+        "condition": {
+          "send_compress": true
+        }
+      },
+      "send_whitelist": {
+        "description": "发送白名单",
+        "type": "list",
+        "default": [],
+        "hint": "留空不限；格式 F:好友号 或 G:群号，其它写法不生效。"
+      },
+      "persona_isolation": {
+        "description": "人格隔离",
+        "type": "bool",
+        "default": true,
+        "hint": "绑定人格的表情只会由对应人格发送。"
+      }
+    }
+  },
+  "semantic_settings": {
+    "description": "语义索引",
+    "type": "object",
+    "items": {
+      "embedding_enabled": {
+        "type": "bool",
+        "description": "语义检索",
+        "hint": "用向量相似度挑表情，比关键词匹配准得多。需要先在「模型提供商」里配一个 embedding 类型的提供商。",
+        "default": false
+      },
+      "embedding_provider_id": {
+        "type": "string",
+        "description": "向量模型提供商 ID",
+        "hint": "留空自动用第一个 embedding 提供商；填错不会报错，会静默回落到关键词。",
+        "default": ""
+      },
+      "embedding_threshold": {
+        "type": "float",
+        "description": "相似度下限",
+        "hint": "最高相似度低于这个值就不发。默认 0 = 不启用。实测 bge-m3 在中文短文本上普遍 0.5 以上，「该发」和「不该发」的分数区间重叠，绝对阈值分不开两类——建议保持 0，靠上面的「发送概率」控制频率；想自己定阈值，把日志调到 DEBUG 就能看到每次挑图的实际分数。",
+        "default": 0.0
+      },
+      "weight_text": {
+        "type": "float",
+        "description": "图上文字权重",
+        "hint": "机器人回复里说出图上的字时该有多像。实测这是最有效的一路。",
+        "default": 0.4
+      },
+      "weight_caption": {
+        "type": "float",
+        "description": "画面描述权重",
+        "hint": "机器人在描述画面内容时该有多像。实测单独用最弱，别调太高。",
+        "default": 0.15
+      },
+      "weight_scenes": {
+        "type": "float",
+        "description": "使用场景权重",
+        "hint": "用户聊到的处境和「这张图适合什么对话」有多像。",
+        "default": 0.35
+      },
+      "weight_label": {
+        "type": "float",
+        "description": "情绪标签权重",
+        "hint": "话语情绪和这张图的情绪标签有多接近。",
+        "default": 0.1
+      },
+      "label_extraction": {
+        "type": "string",
+        "description": "标签来源",
+        "hint": "vector=用 21 个标签的向量比对（免费）；llm=让模型萃取话语情绪（更准，每条多一次调用）",
+        "default": "vector",
+        "options": [
+          "vector",
+          "llm"
+        ],
+        "labels": [
+          "标签向量",
+          "LLM 萃取"
+        ]
+      },
+      "min_keyword_score": {
+        "type": "float",
+        "description": "关键词兜底的最低分",
+        "hint": "关掉语义检索时按关键词匹配。单条得分构成：命中图上文字 +3.0、命中话题词 +2.5、命中画面描述 +1.5；使用次数最多 +1.0、收藏 +0.8、随机最多 +0.05；最近 8 条里用过的会扣 2.0～4.0。\n实测区间（同一条图的分数会在这个范围里浮动）：\n  全都没命中   0 ～ 1.85（只剩使用次数 + 收藏 + 随机）\n  只命中画面   1.55 ～ 3.35\n  命中话题词   2.55 ～ 4.35\n  命中图上文字 3.05 ～ 4.85\n所以推荐 2.0：正好卡在「纯靠使用次数凑数」之上，任何一路真命中都能过。\n填 1.9 只挡掉完全没命中的；填 3.0 则只认图上文字或话题词（光命中画面不发）。",
+        "default": 0.0
+      }
+    }
+  }
+}

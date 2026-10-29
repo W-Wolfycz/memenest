@@ -1,0 +1,13 @@
+{
+  "metadata": {
+    "display_name": "MemeNest",
+    "short_desc": "Collect chat stickers, tag them with a vision model, send one by mood.",
+    "desc": "Collects chat stickers, tags them with a vision model, and sends one that fits the mood."
+  },
+  "pages": {
+    "manager": {
+      "title": "MemeNest Manager",
+      "description": "Browse, approve, block, bind personas and import in bulk."
+    }
+  }
+}
