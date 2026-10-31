@@ -89,6 +89,8 @@ const state = {
   blockedPage: 1,
   blockedTotal: 0,
   personas: [],
+  // 面板导入的并发数：跟着后端的「并发数」配置走，读不到就保守地用 2
+  importConcurrency: 2,
 };
 
 const api = {
@@ -203,6 +205,7 @@ function updateQuickButtons(stats) {
 async function loadStats() {
   const data = await guard(() => api.get("stats"), "读取统计");
   if (!data || !data.ok) return;
+  state.importConcurrency = Math.max(1, Number(data.import_concurrency) || 2);
   // 视觉模型没配的时候，新条目会全部落成「其他」——不说出来没人知道为什么
   const sub = $("page-sub");
   sub.textContent = data.model_available
@@ -590,29 +593,39 @@ function openEdit(id) {
   openModal(
     `编辑 #${id}`,
     `<div class="form">
-      <label class="form-row"><span>描述 · 画面里有什么</span>
-          <textarea class="edit-caption" rows="2" maxlength="80"
-            >${escapeHtml(item.caption || "")}</textarea
-          ></label>
-      <p class="form-hint">谁、什么表情、穿什么。机器人回复在说这类内容时，会优先选它。</p>
-      <label class="form-row"><span>图上文字 · 图里印着的字</span>
-          <textarea class="edit-pic-text" rows="2" maxlength="200"
-            >${escapeHtml(item.text_in_image || "")}</textarea
-          ></label>
-      <p class="form-hint">气泡、贴纸、字幕、梗图配文，逐字照抄。机器人要说的回复里出现这些字、或者意思对得上时，会优先选它。</p>
-      <label class="form-row"><span>使用场景 · 聊到什么话题时会用它</span>
-          <textarea class="edit-scenes" rows="3"
-            >${escapeHtml((item.scenes || []).join("\n"))}</textarea
-          ></label>
-      <p class="form-hint">
-        聊到什么话题时会用它，一行一个话题词，最多 3 个，每个 2-6 字。
-        只写主题不写句子，比如「变猫娘」「写代码」「需求变更」；
-        别抄图上已经印着的字，那是「图上文字」的职责。
-      </p>
-      <label class="form-row"><span>主分类 · 最主要的情绪</span>
-        <select class="edit-label">${options}</select></label>
-      <div class="form-row"><span>还可以算这几种情绪（最多 4 个，含主分类共 5 类）</span>
-        <div class="chip-select">${chips}</div></div>
+      <div class="field-block field-caption">
+        <label class="form-row"><span>描述 · 画面里有什么</span>
+            <textarea class="edit-caption" rows="2" maxlength="80"
+              >${escapeHtml(item.caption || "")}</textarea
+            ></label>
+        <p class="form-hint">谁、什么表情、穿什么。机器人回复在说这类内容时，会优先选它。</p>
+      </div>
+      <div class="field-block field-pic-text">
+        <label class="form-row"><span>图上文字 · 图里印着的字</span>
+            <textarea class="edit-pic-text" rows="2" maxlength="200"
+              >${escapeHtml(item.text_in_image || "")}</textarea
+            ></label>
+        <p class="form-hint">气泡、贴纸、字幕、梗图配文，逐字照抄。机器人要说的回复里出现这些字、或者意思对得上时，会优先选它。</p>
+      </div>
+      <div class="field-block field-scenes">
+        <label class="form-row"><span>使用场景 · 聊到什么话题时会用它</span>
+            <textarea class="edit-scenes" rows="3"
+              >${escapeHtml((item.scenes || []).join("\n"))}</textarea
+            ></label>
+        <p class="form-hint">
+          一行一个话题词，最多 3 个，每个 2-6 字。只写主题不写句子，
+          比如「变猫娘」「写代码」「需求变更」；别抄图上已经印着的字，
+          那是「图上文字」的职责。
+        </p>
+      </div>
+      <div class="field-block field-plain">
+        <label class="form-row"><span>主分类 · 最主要的情绪</span>
+          <select class="edit-label">${options}</select></label>
+      </div>
+      <div class="field-block field-plain">
+        <div class="form-row"><span>还可以算这几种情绪（最多 4 个，含主分类共 5 类）</span>
+          <div class="chip-select">${chips}</div></div>
+      </div>
      </div>
      <div class="modal-actions">
        <button type="button" class="btn ghost" data-close="1">取消</button>
@@ -723,22 +736,32 @@ async function doImportUrls() {
   const tally = importTally();
   $("do-import").disabled = true;
 
-  // 同样一条一条来：下载 → 识别 → 入库，完成再下一条
-  for (let index = 0; index < urls.length; index += 1) {
-    text.textContent = `下载中 ${index + 1} / ${urls.length}`;
-    const res = await guard(
-      () => api.post("import", { url: urls[index], ...params }),
-      "导入",
-    );
+  // 按后端并发上限同时跑几条：每条都是独立的下载 → 识别 → 入库，
+  // 后端 process_one 各自返回自己的结局，不用计数差值反推
+  let done = 0;
+  const tasks = urls.map((url) => async () => {
+    const res = await guard(() => api.post("import", { url, ...params }), "导入");
     countOutcome(tally, res);
-    bar.value = index + 1;
+    done += 1;
+    bar.value = done;
+    text.textContent = `处理中 ${done} / ${urls.length}`;
+  });
+  try {
+    await runWithLimit(tasks, state.importConcurrency);
+    text.textContent = `${urls.length} / ${urls.length}`;
+    $("import-status").innerHTML = `<span class="hint">${importSummary(tally)}</span>`;
+    $("import-urls").value = "";
+    toast(importSummary(tally));
+  } catch (error) {
+    // 不兜住的话按钮会永久禁用、界面没有任何提示——用户只能刷新页面
+    const detail = error.message || String(error);
+    text.textContent = "已中断";
+    $("import-status").innerHTML =
+      `<span class="warn">导入中断：${escapeHtml(detail)}</span>`;
+    toast(`导入中断：${detail}`, true);
+  } finally {
+    $("do-import").disabled = false;
   }
-
-  $("do-import").disabled = false;
-  text.textContent = `${urls.length} / ${urls.length}`;
-  $("import-status").innerHTML = `<span class="hint">${importSummary(tally)}</span>`;
-  $("import-urls").value = "";
-  toast(importSummary(tally));
   await loadStats();
 }
 
@@ -799,19 +822,16 @@ async function doImportFiles(files) {
   const tally = importTally();
   $("do-import-files").disabled = true;
 
-  // 一次只跑一张：上传完这张、等它识别入库，再轮到下一张。
-  // 这样进度条就是真实进度，也不会把后端队列塞满后丢任务。
-  for (let index = 0; index < files.length; index += 1) {
-    const file = files[index];
-    const seq = `${index + 1} / ${files.length}`;
+  // 同样按后端并发上限跑：上传和识别是两步，但每张图各自走完。
+  // 注意 files 是 input.files（FileList），没有 map 方法，必须先转数组。
+  let done = 0;
+  const tasks = Array.from(files, (file) => async () => {
     try {
-      text.textContent = `上传中 ${seq}`;
       const uploaded = await bridge.upload("import/file", file);
       if (!uploaded || !uploaded.ok || !uploaded.job) {
         tally.failed += 1;
         toast(`${file.name} 上传失败：${(uploaded && uploaded.message) || "未知原因"}`, true);
       } else {
-        text.textContent = `处理中 ${seq}`;
         const res = await api.post("import/process", {
           job: uploaded.job,
           ext: uploaded.ext,
@@ -823,13 +843,27 @@ async function doImportFiles(files) {
       tally.failed += 1;
       toast(`${file.name} 失败：${error.message || error}`, true);
     }
-    bar.value = index + 1;
+    done += 1;
+    bar.value = done;
+    text.textContent = `处理中 ${done} / ${files.length}`;
+  });
+  try {
+    await runWithLimit(tasks, state.importConcurrency);
+    text.textContent = `${files.length} / ${files.length}`;
+    $("import-status").innerHTML = `<span class="hint">${importSummary(tally)}</span>`;
+    $("import-files").value = "";
+    $("import-files-hint").textContent = "未选择文件";
+    toast(importSummary(tally));
+  } catch (error) {
+    // 同上：异常必须落到界面上，否则表现成「点了没反应」
+    const detail = error.message || String(error);
+    text.textContent = "已中断";
+    $("import-status").innerHTML =
+      `<span class="warn">导入中断：${escapeHtml(detail)}</span>`;
+    toast(`导入中断：${detail}`, true);
+  } finally {
+    $("do-import-files").disabled = false;
   }
-
-  text.textContent = `${files.length} / ${files.length}`;
-  $("import-status").innerHTML = `<span class="hint">${importSummary(tally)}</span>`;
-  $("import-files").value = "";
-  $("import-files-hint").textContent = "未选择文件";
   await loadStats();
 }
 

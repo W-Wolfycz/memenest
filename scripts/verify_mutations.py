@@ -138,18 +138,12 @@ MUTATIONS: list[tuple[str, str, str | list[str], str | list[str], str]] = [
         "tests/test_embed_vector.py::test_vector_cache_invalidates_on_write",
     ),
     (
-        "阈值方向反了（该发的不发、不该发的照发）",
+        "分数线划得太低（不相关的图也进候选）",
         "publish/dispatcher.py",
-        "        if best < threshold:",
-        "        if best > threshold:",
-        "tests/test_embed_vector.py::test_vector_pick_hits_threshold_rejects_and_degrades",
-    ),
-    (
-        "多样性冲掉相似度（选图变成随机）",
-        "publish/dispatcher.py",
-        "            value = similarity + self._diversity_bonus(memo, recent)",
-        "            value = self._diversity_bonus(memo, recent)",
-        "tests/test_embed_vector.py::test_vector_pick_hits_threshold_rejects_and_degrades",
+        "        floor = best - delta",
+        "        floor = best - 10.0",
+        "tests/test_pick_variety.py"
+        "::test_pick_variety_changes_spread_and_respects_floor",
     ),
     # ---- 人格与作用域 ----
     (
@@ -259,13 +253,43 @@ MUTATIONS: list[tuple[str, str, str | list[str], str | list[str], str]] = [
         "tests/test_pick_score.py::test_scope_filtered_out_is_not_low_relevance",
     ),
     (
-        "话题只认用户消息（机器人自己接梗时选不中）",
+        "话题那一路完全失效（聊到该话题也选不中）",
         "publish/dispatcher.py",
-        "                    if context_query is not None:\n"
-        "                        sims.append(emb.dot(context_query, scene_vec))",
-        "                    if context_query is not None:\n"
-        "                        sims = [emb.dot(context_query, scene_vec)]",
+        "                    sims = [emb.dot(query, scene_vec)]",
+        "                    sims = [0.0]",
         "tests/test_embed_vector.py::test_scene_hit_works_from_reply_side",
+    ),
+    (
+        "并发导入结局串味（先结束的算上别人的入库）",
+        "ingest/pipeline.py",
+        "            outcome = await self._process(ref, ctx)",
+        "            await self._process(ref, ctx)\n"
+        "            outcome = \"stored\"",
+        "tests/test_T08_T12_pipeline.py::test_concurrent_import_reports_own_outcome",
+    ),
+    (
+        "队列与导入各占一份并发（识图 API 被双倍打）",
+        "ingest/pipeline.py",
+        "        async with slots:\n            return await self._run_one(ref, ctx)",
+        "        return await self._run_one(ref, ctx)",
+        "tests/test_T08_T12_pipeline.py"
+        "::test_queue_and_import_share_one_concurrency_budget",
+    ),
+    (
+        "选图变化档位失效（三档一样，用户调了没反应）",
+        "publish/dispatcher.py",
+        "        delta = VARIETY_DELTA.get(variety, VARIETY_DELTA[\"balanced\"])",
+        "        delta = 0.05",
+        "tests/test_pick_variety.py"
+        "::test_pick_variety_changes_spread_and_respects_floor",
+    ),
+    (
+        "选图退化成均匀随机（质量完全让位给多样性）",
+        "publish/dispatcher.py",
+        "        weights = [",
+        "        weights = [1.0 for _ in pool] or [",
+        "tests/test_pick_variety.py"
+        "::test_pick_variety_changes_spread_and_respects_floor",
     ),
 ]
 

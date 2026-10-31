@@ -2,7 +2,7 @@ name: memenest
 display_name: 表情窝
 desc: 收录群聊表情包，视觉模型打标入库，聊天时按情绪自动摸一张发出来。
 short_desc: 收录群聊表情，AI 打标入库，聊天时按情绪自动摸一张出来。
-version: 0.1.0
+version: 0.2.0
 author: Wolfycz
 repo: "https://github.com/W-Wolfycz/memenest"
 astrbot_version: ">=4.29,<5"

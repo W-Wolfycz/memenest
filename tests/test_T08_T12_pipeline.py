@@ -159,3 +159,80 @@ async def test_capacity_eviction_deletes_the_files_too(tmp_path):
     assert len(remaining) == 1
     assert store.stats().total == 1
     store.close()
+
+@pytest.mark.asyncio
+async def test_concurrent_import_reports_own_outcome(tmp_path):
+    """并发导入时每条只报告自己的结局。
+
+    `process_one` 曾经用「计数器前后差值」反推 outcome：前端并发发几条时，
+    先结束的那条会把别人入库的计数算进自己的差值，前端统计就变成
+    「入库 3」但库里只有 1 条。结局必须由 `_process` 直接返回。
+    """
+
+    class _Ref:
+        def __init__(self, source: str) -> None:
+            self.source = source
+
+    class _Pipeline(IngestPipeline):
+        def __init__(self) -> None:
+            pass
+
+        async def _process(self, ref, ctx):  # type: ignore[override]
+            # 故意让先发的慢、后发的快，逼出交错
+            await asyncio.sleep(0.05 if ref.source == "slow" else 0.01)
+            return {"slow": "stored", "fast": "duplicate"}[ref.source]
+
+    pipeline = _Pipeline()
+    pipeline.counters = type(
+        "C", (), {"stored": 0, "duplicate": 0, "failed": 0, "rejected": 0}
+    )()
+    pipeline._log = type(
+        "L", (), {"error": lambda *a, **k: None, "debug": lambda *a, **k: None}
+    )()
+
+    results = await asyncio.gather(
+        pipeline.process_one(_Ref("slow"), None),
+        pipeline.process_one(_Ref("fast"), None),
+    )
+    assert [r["outcome"] for r in results] == ["stored", "duplicate"]
+
+@pytest.mark.asyncio
+async def test_queue_and_import_share_one_concurrency_budget(tmp_path):
+    """队列抓图和面板导入抢同一批槽位。
+
+    两条路径各自并发时，实际并发是 2×worker_count：识图 API 被双倍打、
+    token 消耗翻倍，而用户在面板里只配了「同时处理 2 张」。
+    `worker_count` 必须是全局上限，不能一边一份。
+    """
+
+    class _Ref:
+        def __init__(self, source: str) -> None:
+            self.source = source
+
+    class _Counters:
+        def __init__(self) -> None:
+            self.stored = self.duplicate = self.failed = self.rejected = 0
+
+    class _Pipeline(IngestPipeline):
+        def __init__(self, peak: list[int], workers: int) -> None:
+            self.peak = peak
+            self.running = 0
+            self.counters = _Counters()
+            self._log = type(
+                "L", (), {"error": lambda *a, **k: None, "debug": lambda *a, **k: None}
+            )()
+            self._slots = asyncio.Semaphore(max(1, workers))
+
+        async def _run_one(self, ref, ctx):  # type: ignore[override]
+            self.running += 1
+            self.peak[0] = max(self.peak[0], self.running)
+            await asyncio.sleep(0.05)
+            self.running -= 1
+            return "stored"
+
+    peak = [0]
+    pipeline = _Pipeline(peak, 2)
+    jobs = [pipeline._process(_Ref(f"q{i}"), None) for i in range(3)]
+    jobs += [pipeline.process_one(_Ref(f"i{i}"), None) for i in range(3)]
+    await asyncio.gather(*jobs)
+    assert peak[0] <= 2, f"总并发 {peak[0]} 超过 worker_count=2"

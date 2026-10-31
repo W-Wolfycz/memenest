@@ -71,6 +71,9 @@ def _dispatcher(store, data_dir, delivered: list, **overrides) -> Dispatcher:
         "send_delay_seconds": 0,
         "send_cooldown_seconds": 0,
         "send_enabled": True,
+        # 这些用例测的是发送时序（延迟、去重、停机），不是「选哪张最相关」。
+        # min_keyword_score 默认 2.0 会挡掉这里构造的无关文本，显式关掉。
+        "min_keyword_score": 0.0,
     }
     base.update(overrides)
     settings = Settings(**base)

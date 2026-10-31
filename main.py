@@ -457,6 +457,10 @@ class Main(Star):
     def library_cap(self) -> int:
         return self._settings().library_cap
 
+    def import_concurrency(self) -> int:
+        """面板导入的并发上限：复用 worker_count（「同时处理几张图」）。"""
+        return max(1, int(self._settings().worker_count))
+
     def model_available(self) -> bool:
         return bool(self._model_provider_id)
 

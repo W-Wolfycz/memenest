@@ -379,7 +379,10 @@ class MemoStore:
                     want.add("text")
                 if memo.caption.strip():
                     want.add("caption")
-                if memo.scenes or memo.label:
+                # 只认 scenes：vectors_for 的 scene 文本只拼话题词，不掺情绪标签。
+                # 写成 `scenes or label` 会让「有情绪但没话题词」的条目永远缺这一路，
+                # 面板覆盖率补不齐、每次自动补算都把它们重新算一遍。
+                if memo.scenes:
                     want.add("scene")
                 if not want - have.get(memo.id, set()):
                     continue
@@ -428,7 +431,10 @@ class MemoStore:
                     want.add("text")
                 if memo.caption.strip():
                     want.add("caption")
-                if memo.scenes or memo.label:
+                # 只认 scenes：vectors_for 的 scene 文本只拼话题词，不掺情绪标签。
+                # 写成 `scenes or label` 会让「有情绪但没话题词」的条目永远缺这一路，
+                # 面板覆盖率补不齐、每次自动补算都把它们重新算一遍。
+                if memo.scenes:
                     want.add("scene")
                 if not want:
                     continue

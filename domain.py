@@ -141,6 +141,7 @@ ORIGIN_ADMIN = "admin"
 ORIGIN_IMPORT = "import"
 
 MAX_SCENES = 3
+
 MAX_SCENE_CHARS = 6
 """单个话题词的字数上限；超了整条丢弃，不截断——写成长句说明跑偏了。"""
 MAX_LABELS = 3

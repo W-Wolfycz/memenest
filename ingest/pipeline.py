@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import embed as emb
-from ..config import PERCEPT_THRESHOLD, Settings
+from ..config import QUEUE_CAPACITY, PERCEPT_THRESHOLD, Settings
 from ..paths import is_safe_rel_path
 from ..domain import (
     FALLBACK_LABEL,
@@ -94,6 +94,10 @@ class IngestPipeline:
         self._workers: list[asyncio.Task[None]] = []
         self._stop = asyncio.Event()
         self._dedup_lock = asyncio.Lock()
+        # 全局并发槽位：队列 worker 和面板导入都从这里拿，`worker_count` 才是
+        # 「同时处理几张图」的真实上限。没有它的话两条路径各跑各的，
+        # 实际并发是 2×worker_count，识图 API 会被双倍打。
+        self._slots: asyncio.Semaphore | None = None
 
     # -- 生命周期 ---------------------------------------------------------
 
@@ -136,7 +140,8 @@ class IngestPipeline:
         self.clear_tmp()
         self._stop.clear()
         settings = self._settings()
-        self._queue = asyncio.Queue(maxsize=max(1, settings.queue_capacity))
+        self._slots = asyncio.Semaphore(max(1, settings.worker_count))
+        self._queue = asyncio.Queue(maxsize=max(1, QUEUE_CAPACITY))
         self._workers = [
             asyncio.create_task(self._worker(index), name=f"memenest-worker-{index}")
             for index in range(max(1, settings.worker_count))
@@ -145,6 +150,7 @@ class IngestPipeline:
     async def stop(self) -> None:
         """停队列、取消 worker、等它们退出（I-2 的前半段：不再有新任务）。"""
         self._stop.set()
+        self._slots = None
         queue, self._queue = self._queue, None
         if queue is not None:
             while not queue.empty():
@@ -204,7 +210,23 @@ class IngestPipeline:
             finally:
                 queue.task_done()
 
-    async def _process(self, ref: MediaRef, ctx: IngestContext) -> None:
+    async def _process(self, ref: MediaRef, ctx: IngestContext) -> str:
+        """处理一条：先抢并发槽位，再干活。
+
+        队列 worker 和面板导入都走这里，所以 `worker_count` 是总并发上限。
+        两边平等竞争：用户主动点的导入没有额外配额，点了就尽快跑完，
+        消息抓图那边如果正好在处理就等它腾出槽位（队列有容量，不会丢）。
+
+        没 start 过（单测直接调）时槽位为 None，直接放行。
+        """
+        slots = self._slots
+        if slots is None:
+            return await self._run_one(ref, ctx)
+        async with slots:
+            return await self._run_one(ref, ctx)
+
+    async def _run_one(self, ref: MediaRef, ctx: IngestContext) -> str:
+        """真正处理一条，返回 "stored" / "duplicate" / "failed" / "rejected"。"""
         settings = self._settings()
         limits = FetchLimits(max_bytes=settings.max_bytes, max_pixels=settings.max_pixels)
         fetched = await fetch_media(ref, limits, self.tmp_dir)
@@ -215,7 +237,7 @@ class IngestPipeline:
                 fetched.reason,
                 ref.platform,
             )
-            return
+            return "rejected"
 
         media = fetched.media
         try:
@@ -234,15 +256,15 @@ class IngestPipeline:
                     verdict.reason,
                     verdict.existing_id,
                 )
-                return
+                return "duplicate"
 
             analysis, used_model = await self._classify(media.path)
             if analysis is None:
                 # I-6：分类失败一律不入库，临时文件在 finally 清理。
                 self.counters.failed += 1
-                return
+                return "failed"
 
-            await self._persist(
+            return await self._persist(
                 media.path,
                 media.ext,
                 media.content_hash,
@@ -263,40 +285,18 @@ class IngestPipeline:
     ) -> dict[str, Any]:
         """同步处理一条，不走队列，返回这一条的结果。
 
-        面板逐张导入用：前端发一张、等这张处理完、再发下一张。这样进度条反映
-        的是真实处理进度，也不会把队列塞满后丢任务。
+        面板导入用。结局由 `_process` 直接返回，不能拿计数器前后差值反推：
+        前端并发发几条时，差值会互相把别人的入库算进自己头上。
         """
-        before = self._counter_snapshot()
         try:
-            await self._process(ref, ctx)
+            outcome = await self._process(ref, ctx)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # 与 worker 一致：单条失败不能把请求打成 500
             self.counters.failed += 1
             self._log.error("memenest: 单条处理异常 type=%s", type(exc).__name__)
-        delta = {
-            key: value - before[key]
-            for key, value in self._counter_snapshot().items()
-        }
-        if delta["stored"]:
-            outcome = "stored"
-        elif delta["duplicate"]:
-            outcome = "duplicate"
-        elif delta["failed"]:
             outcome = "failed"
-        elif delta["rejected"]:
-            outcome = "rejected"
-        else:
-            outcome = "skipped"
-        return {"outcome": outcome, **delta}
-
-    def _counter_snapshot(self) -> dict[str, int]:
-        return {
-            "stored": self.counters.stored,
-            "duplicate": self.counters.duplicate,
-            "failed": self.counters.failed,
-            "rejected": self.counters.rejected,
-        }
+        return {"outcome": outcome}
 
     async def _classify(self, path: Path) -> tuple[Analysis | None, bool]:
         """返回 (分析结果, 是否真的调用过模型)。"""
@@ -329,19 +329,19 @@ class IngestPipeline:
         settings: Settings,
         *,
         used_model: bool,
-    ) -> None:
+    ) -> str:
         now = int(self._clock())
         state = STATE_INBOX if (settings.review_enabled or not used_model) else STATE_READY
         target, rel_path = self._target_path(now, content_hash, ext, state)
         if not safe_rel_path(rel_path):
             self._log.error("memenest: 目标路径非法，放弃入库")
-            return
+            return "rejected"
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(tmp_path, target)
         except OSError as exc:
             self._log.error("memenest: 落盘失败 type=%s", type(exc).__name__)
-            return
+            return "rejected"
 
         scope = ctx.scope if ctx.scope in (SCOPE_ANY, SCOPE_ORIGIN) else SCOPE_ANY
         draft = Draft(
@@ -365,22 +365,23 @@ class IngestPipeline:
                 if existing is not None:
                     _unlink(target)
                     self.counters.duplicate += 1
-                    return
+                    return "duplicate"
                 memo_id = await asyncio.to_thread(self.store.add, draft)
         except StoreError as exc:
             self._log.error("memenest: 写库失败 type=%s", type(exc).__name__)
             _unlink(target)
-            return
+            return "failed"
         if memo_id is None:
             # 同一路径已存在：等价于重复，删掉刚搬过来的文件即可。
             _unlink(target)
             self.counters.duplicate += 1
-            return
+            return "duplicate"
         self.counters.stored += 1
         self._log.info(
             "memenest: 入库 id=%s label=%s state=%s", memo_id, analysis.label, state
         )
         await self._index_vector(memo_id, analysis)
+        return "stored"
 
     async def _index_vector(self, memo_id: int, analysis: Analysis) -> None:
         """入库后顺手算向量。失败不影响入库结果，下次重建会补上。"""

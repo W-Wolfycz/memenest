@@ -123,6 +123,7 @@ class PanelApi:
                 "queue_depth": self.plugin.queue_depth(),
                 "model_available": self.plugin.model_available(),
                 "library_cap": self.plugin.library_cap(),
+                "import_concurrency": self.plugin.import_concurrency(),
             }
         )
 

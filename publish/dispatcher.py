@@ -17,7 +17,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..config import Settings
+from ..config import (
+    EMBEDDING_THRESHOLD,
+    SEND_MAX_SIDE,
+    VARIETY_DELTA,
+    WEIGHT_CAPTION,
+    WEIGHT_LABEL,
+    WEIGHT_SCENES,
+    WEIGHT_TEXT,
+    Settings,
+)
 from .. import embed as emb
 from ..domain import (
     LABEL_KEYS,
@@ -339,7 +348,7 @@ class Dispatcher:
             compress_for_send,
             source,
             self.data_dir / CACHE_SUBDIR,
-            max_side=settings.send_max_side,
+            max_side=SEND_MAX_SIDE,
             max_bytes=settings.send_max_bytes,
         )
         if not result.ok:
@@ -489,10 +498,11 @@ class Dispatcher:
         self._pending_context = context_text or text
 
         settings = self._settings()
-        w_text = float(getattr(settings, "weight_text", 0.4))
-        w_caption = float(getattr(settings, "weight_caption", 0.15))
-        w_scenes = float(getattr(settings, "weight_scenes", 0.35))
-        w_label = float(getattr(settings, "weight_label", 0.10))
+        # 权重是实测扫出来的固定值，不做成配置（见 config.WEIGHT_* 的注释）
+        w_text = WEIGHT_TEXT
+        w_caption = WEIGHT_CAPTION
+        w_scenes = WEIGHT_SCENES
+        w_label = WEIGHT_LABEL
 
         query_labels = (
             await self._label_hits(embedder, context_query or query) if w_label else set()
@@ -545,46 +555,53 @@ class Dispatcher:
 
         scored.sort(key=lambda item: -item[0])
         best = scored[0][0]
-        threshold = float(getattr(self._settings(), "embedding_threshold", 0.0) or 0.0)
-        if best < threshold:
-            self.stats.vector_rejects += 1
-            self._log.debug("memenest: 向量相似度低于阈值 best=%.3f < %.3f", best, threshold)
-            return None, True
+        # 取前 K 名，划一条「最高分 - delta」的线，线内按离线的距离加权抽一张。
+        # 直接取第一名会让同一句话永远发同一张：库里 500 张实测只用到 365 张，
+        # 剩下 135 张永远排不到第一。delta 越大进线的越多、越活泼。
+        top = scored[:VECTOR_TOP_K]
+        variety = self._settings().pick_variety
+        delta = VARIETY_DELTA.get(variety, VARIETY_DELTA["balanced"])
+        floor = best - delta
+        pool = [(sim, memo) for sim, memo in top if sim >= floor]
+        if not pool:
+            pool = top[:1]
 
-        # 相似度主导排序，多样性只在「分差很小」时起作用：
-        # 直接拿关键词那套 score_memo 重排会把相似度信号完全冲掉（实测会选错图）。
-        chosen: Memo | None = None
-        chosen_value = float("-inf")
-        chosen_similarity = 0.0
-        for similarity, memo in scored[:VECTOR_TOP_K]:
-            value = similarity + self._diversity_bonus(memo, recent)
-            if value > chosen_value:
-                chosen_value, chosen = value, memo
-                chosen_similarity = similarity
-        if chosen is None:
-            return None, False
+        # 权重 = 分数离线的距离；收藏给一点点加成，其他一律不加。
+        # 以前这里还有 -0.08 的「最近发过」惩罚，比 delta 本身还大，
+        # 会把线内精心挑出来的候选重新排一遍，现在由 delta 天然承担。
+        weights = [
+            max(sim - floor, 0.0) + (0.01 if getattr(memo, "is_fav", False) else 0.0)
+            for sim, memo in pool
+        ]
+        if sum(weights) <= 0:
+            # 收藏加成可能让全员为 0（分数都压在线上），这时退化成均匀采样
+            weights = [1.0] * len(pool)
+        if self._rng is not None:
+            chosen = self._rng.choices(pool, weights=weights, k=1)[0][1]
+        else:
+            total = sum(weights)
+            cut = random.random() * total
+            running = 0.0
+            chosen = pool[-1][1]
+            for (sim, memo), weight in zip(pool, weights):
+                running += weight
+                if cut <= running:
+                    chosen = memo
+                    break
+        chosen_similarity = next(
+            sim for sim, memo in pool if memo.id == chosen.id
+        )
         self.stats.vector_hits += 1
         self._log.debug(
-            "memenest: 向量选中 id=%s 相似度=%.3f 调整后=%.3f 全局最高=%.3f",
+            "memenest: 向量选中 id=%s 相似度=%.3f 线内 %d 张 delta=%.2f 全局最高=%.3f",
             chosen.id,
             chosen_similarity,
-            chosen_value,
+            len(pool),
+            delta,
             best,
         )
         return chosen, True
 
-    def _diversity_bonus(self, memo: Memo, recent: set[int] | list[int]) -> float:
-        """最多 ±0.1 的微调，保证相似度差 0.1 以上不会被翻转。"""
-        bonus = 0.0
-        if memo.id in recent:
-            bonus -= 0.08
-        if getattr(memo, "is_fav", False):
-            bonus += 0.02
-        if memo.use_count <= 0:
-            bonus += 0.01
-        if self._rng is not None:
-            bonus += float(self._rng.uniform(0.0, 0.02))
-        return bonus
 
     async def _deliver_later(
         self, umo: str, memo: Memo, delay: int, state: TurnState
