@@ -29,7 +29,7 @@ MAX_TERM_COUNT = 12
 MAX_TERM_LEN = 20
 THUMB_MAX_SIDE = 200
 THUMB_QUALITY = 78
-THUMB_CACHE_ENTRIES = 256
+THUMB_CACHE_ENTRIES = 1024
 PAGE_SIZE_DEFAULT = 12
 PAGE_SIZE_MAX = 48
 ALLOWED_UPLOAD_EXTS: tuple[str, ...] = (
@@ -299,7 +299,10 @@ def thumb_payload(data: bytes) -> dict[str, Any]:
 
 
 class ThumbCache:
-    """按 (rel_path, mtime) 缓存缩略图字节；写操作后由平台侧整体清空。"""
+    """按 (rel_path, mtime) 缓存缩略图字节；满了淘汰最旧的一批。
+
+    文件一挪 rel_path 就变，旧条目自然 miss，所以写操作后不需要主动清空。
+    """
 
     def __init__(self, limit: int = THUMB_CACHE_ENTRIES) -> None:
         self._limit = max(1, limit)
@@ -310,7 +313,11 @@ class ThumbCache:
 
     def put(self, rel_path: str, mtime_ns: int, data: bytes) -> None:
         if len(self._items) >= self._limit:
-            self._items.clear()
+            # 淘汰最早的四分之一，不全清：全清会让正在翻的整页缩略图重新解码，
+            # 一次卡几百毫秒到几秒。dict 保插入顺序，前 N 个就是最旧的。
+            drop = max(1, self._limit // 4)
+            for key in list(self._items)[:drop]:
+                del self._items[key]
         self._items[(rel_path, mtime_ns)] = data
 
     def clear(self) -> None:

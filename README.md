@@ -107,7 +107,7 @@ AstrBot 表情包插件：拾取群聊里的表情（或所有图片）→ 视�
 - 库结构 **v1**：`memo` / `memo_label` / `memo_scene` / `memo_persona` / `memo_embedding` /
   `blocklist` / `meta`。`memo_embedding` 按 `(memo_id, kind, model)` 存，一条表情最多三行向量。
 - 结构版本记在 `meta.schema_version`；和插件要求的不一致时启动直接报错并提示删库——
-  这个插件还在 0.2.0 阶段，不做静默迁移，也没有需要兼容的旧结构。
+  这个插件还在 0.2.1 阶段，不做静默迁移，也没有需要兼容的旧结构。
 - 写库失败会删掉临时文件，不留半行记录与孤儿文件；容量超限淘汰时同步删文件。
 
 ## 八、已知边界

@@ -315,14 +315,64 @@ class PanelApi:
             return _fail("动作不合法")
         source, target = mapping[action]
         store = self.plugin.store
-        ids = await asyncio.to_thread(store.ids_in_state, source)
-        if not ids:
+        rows = await asyncio.to_thread(store.rows_in_state, source)
+        if not rows:
             return _fail("没有需要处理的条目")
 
-        async def act(memo_id: int) -> tuple[bool, str]:
-            return await self._switch_state(memo_id, target)
+        # 目录跟着状态走：待审核在 inbox/，其余在 blobs/<月>/。
+        # 批量转换时这些路径几乎是同一批文件，逐条 get + set_state 是纯浪费。
+        data_dir = Path(self.plugin.data_dir)
+        want_inbox = target == STATE_INBOX
+        month = time.strftime("%Y%m")
+        moves: dict[int, str] = {}
+        failed: list[dict[str, Any]] = []
+        moved: list[tuple[Path, Path]] = []
+        for memo_id, rel_path in rows:
+            source_path = resolve_within(data_dir, rel_path)
+            if source_path is None:
+                failed.append({"id": memo_id, "reason": "记录路径非法"})
+                continue
+            if want_inbox == rel_path.startswith("inbox/"):
+                continue  # 目录已经对，只改状态
+            new_rel = (
+                f"inbox/{source_path.name}"
+                if want_inbox
+                else f"blobs/{month}/{source_path.name}"
+            )
+            target_path = resolve_within(data_dir, new_rel)
+            if target_path is None:
+                failed.append({"id": memo_id, "reason": "目标路径非法"})
+                continue
+            try:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                source_path.replace(target_path)
+            except OSError:
+                failed.append({"id": memo_id, "reason": "移动文件失败"})
+                continue
+            moves[memo_id] = new_rel
+            moved.append((source_path, target_path))
 
-        return await self._batch(ids, act)
+        ok_ids = [memo_id for memo_id, _ in rows if all(
+            f["id"] != memo_id for f in failed
+        )]
+        try:
+            await asyncio.to_thread(store.set_state_bulk, ok_ids, target, moves)
+        except Exception as exc:
+            # 写库失败要把已经挪走的文件挪回去，否则库里路径和磁盘对不上
+            for source_path, target_path in moved:
+                try:
+                    target_path.replace(source_path)
+                except OSError:
+                    pass
+            logger.error(
+                "[MemeNest] 批量转换写库失败 type=%s", type(exc).__name__
+            )
+            return _fail("写库失败")
+
+        logger.debug(
+            "[MemeNest] 面板批量转换 ok=%s failed=%s", len(ok_ids), len(failed)
+        )
+        return json_response({"ok": True, "succeeded": ok_ids, "failed": failed})
 
     async def _switch_state(self, memo_id: int, wanted: str) -> tuple[bool, str]:
         store = self.plugin.store
@@ -522,8 +572,8 @@ class PanelApi:
                 succeeded.append(memo_id)
             else:
                 failed.append({"id": memo_id, "reason": reason})
-        if succeeded:
-            self._thumbs.clear()
+        # 不清缩略图缓存：兜里的 key 是 (rel_path, mtime)，文件一挪路径就变了，
+        # 旧条目自然 miss。全清反而让前端把整页缩略图重新解码一遍。
         logger.debug("[MemeNest] 面板批量操作 ok=%s failed=%s", len(succeeded), len(failed))
         return json_response({"ok": True, "succeeded": succeeded, "failed": failed})
 
