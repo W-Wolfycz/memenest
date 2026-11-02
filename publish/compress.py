@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -139,16 +140,24 @@ def compress_for_send(
         return CompressResult(None, f"compress_error_{type(exc).__name__}")
 
 
-def clear_cache(cache_dir: Path) -> int:
-    """清空压缩缓存（产物可再生，随时可删）。"""
+def clear_cache(cache_dir: Path, max_age: float = 0.0) -> int:
+    """清空压缩缓存（产物可再生，随时可删）。
+
+    `max_age > 0` 时只清超过这么多秒没被写过的文件。定时清理走这条路：
+    每轮整体清掉等于每次发送都重新压一遍，缓存就白做了。
+    """
     removed = 0
     if not cache_dir.exists():
         return 0
+    cutoff = time.time() - max_age if max_age > 0 else None
     for entry in cache_dir.iterdir():
         try:
-            if entry.is_file():
-                entry.unlink()
-                removed += 1
+            if not entry.is_file():
+                continue
+            if cutoff is not None and entry.stat().st_mtime >= cutoff:
+                continue
+            entry.unlink()
+            removed += 1
         except OSError:
             continue
     return removed

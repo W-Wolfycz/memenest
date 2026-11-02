@@ -95,25 +95,22 @@ MUTATIONS: list[tuple[str, str, str | list[str], str | list[str], str]] = [
         "publish/dispatcher.py",
         [
             "        for task in tasks:\n            task.cancel()\n",
-            "        for state in self._turns.values():\n            state.cancelled = True\n",
+            "            state.cancelled = True\n",
             "        if state.cancelled or self._closed:\n",
         ],
         [
             "        for task in tasks:\n            pass\n",
-            "",
+            "            pass\n",
             "        if False:\n",
         ],
         "tests/test_T13_T23_dispatcher.py::test_T23_shutdown_cancels_pending_and_refuses_new_work",
     ),
     (
-        "新消息打断排期（延迟发送被吞）",
+        "新消息不重置回合（下一回合被上一张吃掉）",
         "publish/dispatcher.py",
-        "        if not umo:\n            return False\n        return_value = False\n",
-        "        if not umo:\n            return False\n        return_value = False\n"
-        "        _victim = self._turns.get(umo)\n"
-        "        if _victim is not None and _victim.task is not None:\n"
-        "            _victim.task.cancel()\n",
-        "tests/test_T13_T23_dispatcher.py::test_T13_new_message_does_not_cancel_the_pending_send",
+        "        if not umo:\n            return\n        self._turns[umo] = TurnState()\n",
+        "        if not umo:\n            return\n        return  # 变异：新消息不重置回合\n",
+        "tests/test_T13_T23_dispatcher.py::test_delayed_landing_only_marks_its_own_turn",
     ),
         (
         "向量三路串味（图上文字里混进画面描述，命中率悄悄下降）",
@@ -202,8 +199,8 @@ MUTATIONS: list[tuple[str, str, str | list[str], str | list[str], str]] = [
     (
         "私网数字主机被放行（SSRF）",
         "ingest/security.py",
-        "    if _NUMERIC_HOST.fullmatch(name):",
-        "    if False:",
+        "        return bool(_NUMERIC_HOST.fullmatch(name))",
+        "        return False",
         "tests/test_T21_T24_store.py::test_T24_numeric_host_forms_are_forbidden",
     ),
     (
@@ -251,6 +248,58 @@ MUTATIONS: list[tuple[str, str, str | list[str], str | list[str], str]] = [
         "    if not pool:\n        return None, False",
         "    if not pool:\n        return None, True",
         "tests/test_pick_score.py::test_scope_filtered_out_is_not_low_relevance",
+    ),
+    (
+        "语义下限不生效（相似度再低也照发）",
+        "publish/dispatcher.py",
+        "        if threshold > 0 and best < threshold:",
+        "        if False:",
+        "tests/test_embed_vector.py::test_embedding_min_similarity_blocks_weak_matches",
+    ),
+    (
+        "延迟落地标记了当前回合（吞掉下一条回复的配图）",
+        "publish/dispatcher.py",
+        "        await self._mark_used(umo, memo, state)",
+        "        await self._mark_used(umo, memo)",
+        "tests/test_T13_T23_dispatcher.py::test_delayed_landing_only_marks_its_own_turn",
+    ),
+    # ---- 人格禁用（mute） ----
+    (
+        "禁用被通用名单盖掉（禁用了照样发）",
+        "publish/pick.py",
+        "    if persona_id and persona_id in memo.blocked_persona_ids:\n        return False\n"
+        "    if GENERIC_PERSONA in memo.persona_ids:\n        return True\n",
+        "    if GENERIC_PERSONA in memo.persona_ids:\n        return True\n"
+        "    if persona_id and persona_id in memo.blocked_persona_ids:\n        return False\n",
+        "tests/test_incr_persona.py::test_reblock_same_persona_is_idempotent",
+    ),
+    (
+        "禁用名单写入不生效（面板保存后没变化）",
+        "panel_core.py",
+        '    if "block_persona_ids" in body:',
+        '    if "block_personas" in body:',
+        "tests/test_panel_core.py::test_persona_params_keeps_allow_and_block_apart",
+    ),
+    (
+        "mute 不需要管理员（任何成员能禁用表情）",
+        "commands_core.py",
+        'WRITE_SUBS: frozenset[str] = frozenset({"on", "off", "grab", "mute", "unmute"})',
+        'WRITE_SUBS: frozenset[str] = frozenset({"on", "off", "grab"})',
+        "tests/test_T29_commands.py::test_member_cannot_mute",
+    ),
+    (
+        "unmute 写成 mute（越恢复越禁）",
+        "commands.py",
+        "        return await self._toggle_persona_block(event, umo, enabled=False)",
+        "        return await self._toggle_persona_block(event, umo, enabled=True)",
+        "tests/test_T29_commands.py::test_unmute_undoes_the_block",
+    ),
+    (
+        "裸命令名不再落 status（发了 /memenest 没反应）",
+        "commands_core.py",
+        '        return ParsedCommand("status", default=True)',
+        '        return ParsedCommand("status")',
+        "tests/test_T29_commands.py::test_bare_command_name_marks_default_subcommand",
     ),
     (
         "话题那一路完全失效（聊到该话题也选不中）",

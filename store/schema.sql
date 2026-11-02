@@ -1,4 +1,4 @@
--- 表情窝 · 库结构（schema_version = 2）
+-- 表情窝 · 库结构（schema_version = 1，与 store.py 的 SCHEMA_VERSION 对应）
 -- 约定：rel_path 相对插件数据目录，正斜杠分隔；所有时间列为 Unix 秒。
 
 CREATE TABLE IF NOT EXISTS memo (
@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS memo (
     created_at   INTEGER NOT NULL,
     used_at      INTEGER NOT NULL DEFAULT 0,
     origin_kind  TEXT,
+    -- 历史遗留列：人格改绑走 memo_persona 关联表，这一列没有任何读写点，
+    -- 保留只是为了不触发结构版本变更（删列要改 schema_version）。
     persona_id   TEXT
 );
 
@@ -54,6 +56,18 @@ CREATE TABLE IF NOT EXISTS memo_persona (
 );
 
 CREATE INDEX IF NOT EXISTS idx_memo_persona_pid ON memo_persona(persona_id);
+
+-- 人格禁用名单：命中的「表情 + 人格」组合不发送。与 memo_persona 的可用名单并存，
+-- 判定时禁用优先（可用名单里是 * 也照样禁用这一个）。
+-- 单独建表而不是给 memo_persona 加列：加列在老库上需要 ALTER TABLE，
+-- 而这里用 IF NOT EXISTS 就能让旧库在启动时自动补建，不需要删库重建。
+CREATE TABLE IF NOT EXISTS memo_persona_block (
+    memo_id    INTEGER NOT NULL REFERENCES memo(id) ON DELETE CASCADE,
+    persona_id TEXT    NOT NULL,
+    PRIMARY KEY (memo_id, persona_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memo_persona_block_pid ON memo_persona_block(persona_id);
 
 -- v2：附加主标签（同一条表情覆盖多种情绪；label 列仍是主标签）
 CREATE TABLE IF NOT EXISTS memo_label (

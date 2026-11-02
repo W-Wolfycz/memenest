@@ -190,6 +190,12 @@
         "hint": "没开语义检索时，靠关键词匹配的及格线。分数太低说明这句话和库里哪张都不搭，宁可不发。填 0 就是不设限，有候选就发。",
         "default": 2.0
       },
+      "embedding_min_similarity": {
+        "type": "float",
+        "description": "语义相似度下限",
+        "hint": "开了语义检索时，最高分低于这个值就这回合不发。填 0 就是不设限。0.45 左右是实测「该发」的下沿，调高会更安静、也会漏掉一些。",
+        "default": 0.0
+      },
       "pick_variety": {
         "type": "string",
         "description": "选图变化程度",

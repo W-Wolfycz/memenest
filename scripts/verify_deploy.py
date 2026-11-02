@@ -118,6 +118,31 @@ def main() -> int:
         f"{len(hooks)} 个 hook" + (f"，{len(mismatched)} 个不一致" if mismatched else ""),
     )
 
+    # 6.5 指令是否注册进宿主：WebUI 指令列表与 /help 只看注册过的，
+    # 自己手写解析的指令在那边完全不存在。
+    from astrbot.core.star.filter.command import CommandFilter
+
+    registered: set[str] = set()
+    for handler in hooks:
+        for event_filter in handler.event_filters:
+            if isinstance(event_filter, CommandFilter):
+                registered.update(event_filter.get_complete_command_names())
+    expected = {
+        "memenest status",
+        "memenest help",
+        "memenest grab",
+        "memenest on",
+        "memenest off",
+        "memenest mute",
+        "memenest unmute",
+    }
+    missing = expected - registered
+    check(
+        "指令已注册到宿主",
+        not missing,
+        f"缺 {sorted(missing)}" if missing else ", ".join(sorted(registered)),
+    )
+
     # 8. schema 叶子键与配置字段一一对应（少一个就是配置静默失效）
     try:
         import dataclasses

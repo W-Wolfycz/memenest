@@ -1,7 +1,8 @@
 """配置读取与校验：只做 dict → 不可变设置的转换，不碰任何 IO。
 
-配置项在界面上分 4 组（基础 / 收集与并发 / 识别与入库 / 发表情），顶层另有 log_with_bot_id；
-读的时候先展平成一张表再取值，所以分组只是展示结构，代码里仍是一层字段。
+配置项在界面上分 5 组（基础 / 收集与并发 / 识别与入库 / 发表情 / 语义索引），
+顶层另有 log_with_bot_id；读的时候先展平成一张表再取值，所以分组只是展示结构，
+代码里仍是一层字段。
 """
 
 from __future__ import annotations
@@ -18,8 +19,6 @@ COMMAND_NAME = "memenest"
 
 PERCEPT_THRESHOLD = 8
 """同图判定容差（0~64）。内部常量，不暴露成配置项。"""
-
-"""强制收录默认时长。/memenest grab 60 可以临时改。"""
 
 THROTTLE_MODES = ("ratio", "cooldown")
 
@@ -75,10 +74,6 @@ WEIGHT_TEXT = 0.15
 WEIGHT_CAPTION = 0.25
 WEIGHT_SCENES = 0.30
 WEIGHT_LABEL = 0.10
-
-# 相似度下限：实测「该发」和「不该发」的分数区间重叠，开这个只会误杀，
-# 留给关键词兜底那条路去管「宁可不发」。
-EMBEDDING_THRESHOLD = 0.0
 
 # 纯技术参数：默认值在所有实测场景下都够用，没有调的必要。
 QUEUE_CAPACITY = 32
@@ -171,6 +166,9 @@ class Settings:
     embedding_provider_id: str = ""
     # 关键词兜底路的最低分：低于它就不发（0 = 关闭，永远发）
     min_keyword_score: float = 2.0
+    # 语义路的最低分：低于它就不发（0 = 关闭）。默认关，因为「该发/不该发」的
+    # 相似度区间实测有重叠，开太严会误杀；想更安静再往上抬。
+    embedding_min_similarity: float = 0.0
     pick_variety: str = "balanced"
     # 四路检索权重。text=图上文字（机器人说这句时用），caption=画面描述，
     # scenes=话题词（谁说都算），label=情绪标签。
@@ -191,10 +189,6 @@ class Settings:
     @property
     def send_max_bytes(self) -> int:
         return int(SEND_MAX_KB * 1024)
-
-    @property
-    def command_prefix(self) -> str:
-        return COMMAND_NAME
 
 
 def flattened_keys(raw: dict[str, Any] | None) -> set[str]:
@@ -235,6 +229,9 @@ def load_settings(raw: dict[str, Any] | None, *, warn: Any = None) -> Settings:
         embedding_enabled=_as_bool(data.get("embedding_enabled"), False),
         embedding_provider_id=str(data.get("embedding_provider_id") or "").strip(),
         min_keyword_score=_as_float(data.get("min_keyword_score"), 2.0, 0.0, 10.0),
+        embedding_min_similarity=_as_float(
+            data.get("embedding_min_similarity"), 0.0, 0.0, 1.0
+        ),
         pick_variety=_as_variety(data.get("pick_variety")),
         label_extraction=(
             "llm"
@@ -249,30 +246,36 @@ def load_settings(raw: dict[str, Any] | None, *, warn: Any = None) -> Settings:
 
 _KNOWN_KEYS = frozenset(
     {
+        "log_with_bot_id",
+        # 基础设置
         "collect_enabled",
         "collect_all_images",
-        "collect_blacklist",
+        # 收集与并发
         "throttle_mode",
         "collect_ratio",
         "cooldown_seconds",
-            "worker_count",
+        "worker_count",
         "max_file_mb",
-            "vision_provider_id",
+        "collect_blacklist",
+        # 识别与入库
+        "vision_provider_id",
         "review_enabled",
         "library_cap",
+        # 发表情
         "send_enabled",
         "send_tools_enabled",
         "send_ratio",
         "send_delay_seconds",
         "send_cooldown_seconds",
         "send_compress",
-                "persona_isolation",
+        "send_whitelist",
+        "persona_isolation",
+        # 语义索引
         "embedding_enabled",
         "embedding_provider_id",
-            "min_keyword_score",
-    "pick_variety",
-                        "label_extraction",
-        "send_whitelist",
-        "log_with_bot_id",
+        "label_extraction",
+        "min_keyword_score",
+        "embedding_min_similarity",
+        "pick_variety",
     }
 )

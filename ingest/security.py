@@ -49,13 +49,13 @@ def is_forbidden_host(host: str) -> bool:
         return True
     if any(name.endswith(suffix) for suffix in FORBIDDEN_HOST_SUFFIXES):
         return True
-    if _NUMERIC_HOST.fullmatch(name):
-        # 纯数字/十六进制形态：不是标准点分十进制，也不可能是正常域名。
-        return True
     try:
         address = ipaddress.ip_address(name)
     except ValueError:
-        return False
+        # 标准写法之外的形式（2130706433 / 0x7f000001 / 127.1 / 0177.0.0.1）：
+        # ipaddress 认不出，但部分平台的 getaddrinfo 会把它们解析成内网地址，
+        # 一律拒绝。公网 IP 的标准点分十进制在上一步就能解析成功，不受影响。
+        return bool(_NUMERIC_HOST.fullmatch(name))
     return bool(
         address.is_private
         or address.is_loopback

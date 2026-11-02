@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import (
-    EMBEDDING_THRESHOLD,
+    COMMAND_NAME,
     SEND_MAX_SIDE,
     VARIETY_DELTA,
     WEIGHT_CAPTION,
@@ -122,11 +122,16 @@ class Dispatcher:
         self._label_llm = label_llm
         self._turns: OrderedDict[str, TurnState] = OrderedDict()
         self._last_sent: OrderedDict[str, float] = OrderedDict()
+        # 已排期但还没落地的发送任务。回合表会在下一条消息到来时被重置，
+        # 任务本身不能跟着丢——停机时要逐个取消，否则就是幽灵发图。
+        self._pending: set[asyncio.Task[None]] = set()
         self.stats = DeliveryStats()
         self._closed = False
         # 21 个标签的向量：一次算好反复用，模型变了才重算
         self._label_vecs: dict[str, tuple[float, ...]] = {}
         self._label_model = ""
+        # `label_extraction=llm` 时从这句话里萃取情绪；每回合由 _pick_by_vector 覆盖
+        self._pending_context = ""
 
     # -- 回合 -------------------------------------------------------------
 
@@ -145,22 +150,18 @@ class Dispatcher:
         while len(store) > MAX_TRACKED_TURNS:
             store.popitem(last=False)
 
-    def note_incoming(self, umo: str | None) -> bool:
-        """新消息 = 新回合：只重置回合状态，不打断已经在延迟里的发送。
+    def note_incoming(self, umo: str | None) -> None:
+        """新消息 = 新回合：重置回合状态，但**不打断**已经在延迟里的发送。
 
-        延迟是纯粹的「等 N 秒再发」，别人说话不影响它。
+        延迟只是「等 N 秒再发」，别人说话不该让上一张取消；反过来，已经在跑的
+        任务也不该继续占着回合标记，所以这里无条件换一份新状态。
+        （任务本身记在 `_pending` 里，不依赖回合表还引用着它。）
         """
         if not umo:
-            return False
-        return_value = False
-        previous = self._turns.get(umo)
-        if previous is not None and previous.task is not None and not previous.task.done():
-            self._log.debug("memenest: 上一回合仍在延迟中，保留不打断 umo=%s", umo)
-            return_value = False
+            return
         self._turns[umo] = TurnState()
         self._turns.move_to_end(umo)
         self._prune(self._turns)
-        return return_value
 
     # -- 会话策略 ---------------------------------------------------------
 
@@ -188,7 +189,7 @@ class Dispatcher:
             try:
                 persona_id = self._persona_resolver(umo) or None
             except Exception as exc:
-                self._log.debug("memenest: 解析人格失败 type=%s", type(exc).__name__)
+                self._log.debug("[MemeNest] 解析人格失败 type=%s", type(exc).__name__)
         return persona_id, True
 
     # -- 闸与选片 ---------------------------------------------------------
@@ -231,7 +232,7 @@ class Dispatcher:
         )
         if not decision.allowed:
             self.stats.note_reject(decision.code)
-            self._log.debug("memenest: 闸拒绝 code=%s detail=%s", decision.code, decision.detail)
+            self._log.debug("[MemeNest] 闸拒绝 code=%s detail=%s", decision.code, decision.detail)
             return FireOutcome(decision.code, detail=decision.detail)
 
         persona_id, persona_filter = self._filters(umo)
@@ -242,20 +243,23 @@ class Dispatcher:
             if low_relevance:
                 self.stats.note_reject(Reason.LOW_RELEVANCE)
                 self._log.debug(
-                    "memenest: 候选都不够相关（下限 %.2f），本回合不发 umo=%s",
+                    "[MemeNest] 候选都不够相关（下限 %.2f），本回合不发 umo=%s",
                     settings.min_keyword_score,
                     umo,
                 )
                 return FireOutcome(Reason.LOW_RELEVANCE)
             self.stats.note_reject(Reason.NO_CANDIDATE)
-            self._log.debug("memenest: 没有可用候选 umo=%s", umo)
+            self._log.debug("[MemeNest] 没有可用候选 umo=%s", umo)
             return FireOutcome(Reason.NO_CANDIDATE)
 
         state.used = True
         delay = max(0, settings.send_delay_seconds)
-        state.task = asyncio.get_running_loop().create_task(
+        task = asyncio.get_running_loop().create_task(
             self._deliver_later(umo, memo, delay, state), name="memenest-send"
         )
+        state.task = task
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
         return FireOutcome(Reason.OK, scheduled=True, memo=memo)
 
     def _roll(self) -> float:
@@ -352,22 +356,28 @@ class Dispatcher:
             max_bytes=settings.send_max_bytes,
         )
         if not result.ok:
-            self._log.debug("memenest: 压缩失败 reason=%s，回落原图", result.reason)
+            self._log.debug("[MemeNest] 压缩失败 reason=%s，回落原图", result.reason)
             return source
         if result.reason == "compressed":
             self.stats.compressed += 1
         return result.path
 
-    async def _mark_used(self, umo: str, memo: Memo) -> None:
+    async def _mark_used(
+        self, umo: str, memo: Memo, state: TurnState | None = None
+    ) -> None:
+        """记一次成功发送：更新冷却起点与使用计数，并标记**发起它的那个回合**。
+
+        `state` 必须由调用方传入：延迟落地时当前回合可能已经换成下一条消息的回合，
+        再用 `_state(umo)` 去取就会把下一回合提前判成「已用过」，吞掉它的一次配图。
+        """
         now = self._clock()
         self._last_sent[umo] = now
         self._prune(self._last_sent)
         try:
             await asyncio.to_thread(self.store.bump_usage, memo.id, int(now))
         except Exception as exc:  # 统计失败不影响已发出的消息
-            self._log.debug("memenest: 使用计数失败 type=%s", type(exc).__name__)
-        state = self._state(umo)
-        state.used = True
+            self._log.debug("[MemeNest] 使用计数失败 type=%s", type(exc).__name__)
+        (state if state is not None else self._state(umo)).used = True
 
     # -- 延迟下发 ---------------------------------------------------------
 
@@ -434,13 +444,13 @@ class Dispatcher:
         比标签向量准（能理解反讽、上下文），代价是每条消息多一次模型调用；
         默认走向量，只有把 `label_extraction` 改成 llm 才走这条。
         """
-        text = getattr(self, "_pending_context", "") or ""
-        if not text.strip():
+        text = self._pending_context.strip()
+        if not text:
             return set()
         try:
             raw = await self._label_llm(text)
         except Exception as exc:
-            self._log.debug("memenest: 标签萃取失败 type=%s", type(exc).__name__)
+            self._log.debug("[MemeNest] 标签萃取失败 type=%s", type(exc).__name__)
             return set()
         from ..domain import normalize_labels
 
@@ -489,7 +499,7 @@ class Dispatcher:
         query = await embedder.embed(text)
         if query is None:
             self.stats.vector_degraded += 1
-            self._log.debug("memenest: 查询向量失败，回落到关键词")
+            self._log.debug("[MemeNest] 查询向量失败，回落到关键词")
             return None, False
         context_query = None
         if context_text.strip():
@@ -555,6 +565,17 @@ class Dispatcher:
 
         scored.sort(key=lambda item: -item[0])
         best = scored[0][0]
+        # 语义下限：全场最高分都不到线就这回合不发。默认 0 = 不设限——
+        # 实测「该发」与「不该发」的相似度区间有重叠，默认值开得太严只会误杀。
+        threshold = float(getattr(settings, "embedding_min_similarity", 0.0) or 0.0)
+        if threshold > 0 and best < threshold:
+            self.stats.vector_rejects += 1
+            self._log.debug(
+                "[MemeNest] 相似度低于下限 最高=%.3f 下限=%.3f，本回合不发",
+                best,
+                threshold,
+            )
+            return None, True
         # 取前 K 名，划一条「最高分 - delta」的线，线内按离线的距离加权抽一张。
         # 直接取第一名会让同一句话永远发同一张：库里 500 张实测只用到 365 张，
         # 剩下 135 张永远排不到第一。delta 越大进线的越多、越活泼。
@@ -593,7 +614,7 @@ class Dispatcher:
         )
         self.stats.vector_hits += 1
         self._log.debug(
-            "memenest: 向量选中 id=%s 相似度=%.3f 线内 %d 张 delta=%.2f 全局最高=%.3f",
+            "[MemeNest] 向量选中 id=%s 相似度=%.3f 线内 %d 张 delta=%.2f 全局最高=%.3f",
             chosen.id,
             chosen_similarity,
             len(pool),
@@ -611,7 +632,7 @@ class Dispatcher:
             if delay:
                 await asyncio.sleep(delay)
         except asyncio.CancelledError:
-            self._log.debug("memenest: 发送被取消 umo=%s", umo)
+            self._log.debug("[MemeNest] 发送被取消 umo=%s", umo)
             raise
         if state.cancelled or self._closed:
             self.stats.cancelled += 1
@@ -619,38 +640,37 @@ class Dispatcher:
         path = await self._prepare_path(memo)
         if path is None:
             self.stats.failed += 1
-            self._log.debug("memenest: 发送放弃 reason=%s id=%s", Reason.FILE_MISSING, memo.id)
+            self._log.debug("[MemeNest] 发送放弃 reason=%s id=%s", Reason.FILE_MISSING, memo.id)
             return
         ok = await self._deliver(umo, path)
         if not ok:
             self.stats.failed += 1
-            self._log.debug("memenest: 发送失败 reason=%s id=%s", Reason.SEND_FAILED, memo.id)
+            self._log.debug("[MemeNest] 发送失败 reason=%s id=%s", Reason.SEND_FAILED, memo.id)
             return
         self.stats.sent += 1
-        await self._mark_used(umo, memo)
+        await self._mark_used(umo, memo, state)
 
     # -- 停机 -------------------------------------------------------------
 
     async def shutdown(self) -> None:
-        """取消全部待发任务（I-2）。"""
+        """取消全部待发任务（I-2），不论它们还挂在哪一回合上。"""
         self._closed = True
-        tasks = [
-            state.task
-            for state in self._turns.values()
-            if state.task is not None and not state.task.done()
-        ]
+        tasks = set(self._pending)
         for state in self._turns.values():
+            if state.task is not None and not state.task.done():
+                tasks.add(state.task)
             state.cancelled = True
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        self._pending.clear()
         self._turns.clear()
 
 
 def _command_markers(settings: Settings) -> tuple[str, ...]:
     """命令类回复一律不补表情：默认标记 + 本插件自己的指令前缀。"""
-    return gate.DEFAULT_COMMAND_MARKERS + (f"/{settings.command_prefix}",)
+    return gate.DEFAULT_COMMAND_MARKERS + (f"/{COMMAND_NAME}",)
 
 
 __all__ = ["DeliveryStats", "Dispatcher", "FireOutcome", "TurnState"]

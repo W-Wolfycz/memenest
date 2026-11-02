@@ -334,6 +334,8 @@ class Memo:
     labels: tuple[str, ...] = ()
     persona_ids: tuple[str, ...] = ()
     """绑定的人格；空表示通用。"""
+    blocked_persona_ids: tuple[str, ...] = ()
+    """禁用的人格：这些人在这个会话里不会收到这条表情，优先于可用名单。"""
 
     @property
     def haystack(self) -> str:

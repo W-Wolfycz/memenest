@@ -187,3 +187,34 @@ async def test_whitelist_blocks_sessions_outside_it(tmp_path):
     finally:
         await dispatcher.shutdown()
         store.close()
+
+
+@pytest.mark.asyncio
+async def test_delayed_landing_only_marks_its_own_turn(tmp_path):
+    """延迟落地只标记「发起它的那个回合」。
+
+    落地时若去取「当前回合」，延迟窗口内进来的那条消息的回合会被提前判成已用过，
+    它自己的回复就静默少一张图——不报错，日志里也看不出来。
+    """
+    store, data_dir, _ = _setup(tmp_path)
+    delivered: list = []
+    dispatcher = _dispatcher(store, data_dir, delivered, send_delay_seconds=1)
+    try:
+        first = await dispatcher.fire(umo=UMO, text=LONG_TEXT, reply_has_image=False)
+        assert first.scheduled is True
+        # 延迟窗口里用户又发了一条：新回合开始，它的回复还没轮到
+        dispatcher.note_incoming(UMO)
+        # 等「这一次发送彻底结束」而不是等投递回调：投递回调在 _mark_used 之前，
+        # 只等它会在标记落库前就往下走，变异（标记当前回合）就不会被测出来。
+        assert await _wait_until(
+            lambda: store.page(PageQuery())[0][0].use_count == 1, timeout=2.5
+        )
+
+        # 新回合的回复现在才到：它应该照常能排一张
+        second = await dispatcher.fire(umo=UMO, text=LONG_TEXT, reply_has_image=False)
+        assert second.code == Reason.OK
+        assert second.scheduled is True
+        assert await _wait_until(lambda: len(delivered) == 2, timeout=2.5)
+    finally:
+        await dispatcher.shutdown()
+        store.close()

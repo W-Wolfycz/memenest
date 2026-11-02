@@ -373,6 +373,58 @@ class MemoStore:
         return result
 
 
+    def _covered_kinds(
+        self, conn: sqlite3.Connection, model: str, dim: int = 0
+    ) -> dict[int, set[str]]:
+        """已有向量的 {memo_id: {kind}}；给了 dim 就只认维度匹配的行。"""
+        if dim > 0:
+            rows = conn.execute(
+                "SELECT memo_id, kind FROM memo_embedding WHERE model = ? AND dim = ?",
+                (model, dim),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT memo_id, kind FROM memo_embedding WHERE model = ?", (model,)
+            ).fetchall()
+        have: dict[int, set[str]] = {}
+        for row in rows:
+            have.setdefault(int(row["memo_id"]), set()).add(str(row["kind"]))
+        return have
+
+    def _wanted_kinds(self, conn: sqlite3.Connection) -> dict[int, set[str]]:
+        """每条可用/待审核的表情「应该有哪几路向量」。
+
+        刻意不走 `_row_to_memo`：那会按行再查三次关联表，2000 条就是 6000 次查询，
+        而这里只需要「图上有没有字 / 有没有描述 / 有没有话题词」三个布尔。
+        """
+        rows = conn.execute(
+            "SELECT id, text_in_img <> '' AS has_text, caption <> '' AS has_cap "
+            "FROM memo WHERE state != ?",
+            (STATE_DISABLED,),
+        ).fetchall()
+        with_scene = {
+            int(row["memo_id"])
+            for row in conn.execute(
+                "SELECT DISTINCT memo_id FROM memo_scene", ()
+            ).fetchall()
+        }
+        wanted: dict[int, set[str]] = {}
+        for row in rows:
+            memo_id = int(row["id"])
+            kinds: set[str] = set()
+            if row["has_text"]:
+                kinds.add("text")
+            if row["has_cap"]:
+                kinds.add("caption")
+            # 只认 scenes：vectors_for 的 scene 文本只拼话题词，不掺情绪标签。
+            # 写成 `scenes or label` 会让「有情绪但没话题词」的条目永远缺这一路，
+            # 面板覆盖率补不齐、每次自动补算都把它们重新算一遍。
+            if memo_id in with_scene:
+                kinds.add("scene")
+            if kinds:
+                wanted[memo_id] = kinds
+        return wanted
+
     def missing_embedding_memos(
         self, model: str, dim: int = 0, limit: int = 0
     ) -> list[Memo]:
@@ -385,41 +437,24 @@ class MemoStore:
         不能因为少了这一路就当成没算过、被反复返回、无限重算。
         """
         with self._connect() as conn:
-            if dim > 0:
-                covered = conn.execute(
-                    "SELECT memo_id, kind FROM memo_embedding WHERE model = ? AND dim = ?",
-                    (model, dim),
-                ).fetchall()
-            else:
-                covered = conn.execute(
-                    "SELECT memo_id, kind FROM memo_embedding WHERE model = ?", (model,)
-                ).fetchall()
-            have: dict[int, set[str]] = {}
-            for row in covered:
-                have.setdefault(int(row["memo_id"]), set()).add(str(row["kind"]))
-
+            have = self._covered_kinds(conn, model, dim)
+            wanted = self._wanted_kinds(conn)
+            missing = [
+                memo_id
+                for memo_id, kinds in wanted.items()
+                if kinds - have.get(memo_id, set())
+            ]
+            missing.sort(reverse=True)
+            if limit > 0:
+                missing = missing[:limit]
+            if not missing:
+                return []
+            placeholders = ",".join("?" for _ in missing)
             rows = conn.execute(
-                "SELECT * FROM memo WHERE state != ? ORDER BY id DESC", (STATE_DISABLED,)
+                f"SELECT * FROM memo WHERE id IN ({placeholders}) ORDER BY id DESC",
+                missing,
             ).fetchall()
-            pending: list[Memo] = []
-            for row in rows:
-                memo = self._row_to_memo(conn, row)
-                want = set()
-                if memo.text_in_img.strip():
-                    want.add("text")
-                if memo.caption.strip():
-                    want.add("caption")
-                # 只认 scenes：vectors_for 的 scene 文本只拼话题词，不掺情绪标签。
-                # 写成 `scenes or label` 会让「有情绪但没话题词」的条目永远缺这一路，
-                # 面板覆盖率补不齐、每次自动补算都把它们重新算一遍。
-                if memo.scenes:
-                    want.add("scene")
-                if not want - have.get(memo.id, set()):
-                    continue
-                pending.append(memo)
-                if limit > 0 and len(pending) >= limit:
-                    break
-            return pending
+            return self._rows_to_memos(conn, rows)
 
     def ids_in_state(self, state: str) -> list[int]:
         """某状态下的全部 id（不受分页影响），供「一键转换」使用。"""
@@ -436,42 +471,12 @@ class MemoStore:
         按行数算会让进度显示成 3 倍。所谓「算齐」= 该有的那几路都在。
         """
         with self._connect() as conn:
-            if dim > 0:
-                covered_rows = conn.execute(
-                    "SELECT memo_id, kind FROM memo_embedding WHERE model = ? AND dim = ?",
-                    (model, dim),
-                ).fetchall()
-            else:
-                covered_rows = conn.execute(
-                    "SELECT memo_id, kind FROM memo_embedding WHERE model = ?", (model,)
-                ).fetchall()
-            have: dict[int, set[str]] = {}
-            for row in covered_rows:
-                have.setdefault(int(row["memo_id"]), set()).add(str(row["kind"]))
-
-            rows = conn.execute(
-                "SELECT * FROM memo WHERE state != ?", (STATE_DISABLED,)
-            ).fetchall()
-            expected = 0
-            done = 0
-            for row in rows:
-                memo = self._row_to_memo(conn, row)
-                want = set()
-                if memo.text_in_img.strip():
-                    want.add("text")
-                if memo.caption.strip():
-                    want.add("caption")
-                # 只认 scenes：vectors_for 的 scene 文本只拼话题词，不掺情绪标签。
-                # 写成 `scenes or label` 会让「有情绪但没话题词」的条目永远缺这一路，
-                # 面板覆盖率补不齐、每次自动补算都把它们重新算一遍。
-                if memo.scenes:
-                    want.add("scene")
-                if not want:
-                    continue
-                expected += 1
-                if not want - have.get(memo.id, set()):
-                    done += 1
-        return done, expected
+            have = self._covered_kinds(conn, model, dim)
+            wanted = self._wanted_kinds(conn)
+        done = sum(
+            1 for memo_id, kinds in wanted.items() if not (kinds - have.get(memo_id, set()))
+        )
+        return done, len(wanted)
 
     def clear_embeddings(self, model: str | None = None) -> int:
         with self._connect() as conn:
@@ -485,7 +490,12 @@ class MemoStore:
         return int(cursor.rowcount or 0)
 
     def set_personas(self, memo_id: int, persona_ids: list[str] | tuple[str, ...]) -> bool:
-        """整体替换某条表情绑定的人格；传空表示改回通用。"""
+        """整体替换某条表情绑定的人格。
+
+        传空列表 = **谁都不用**（面板上显示成对应徽章），传 `("*",)` 才是通用。
+        新建入库时 `add()` 会把空列表补成通用；这里是人肉改绑，不做隐式补全，
+        否则用户取消全部勾选时会被悄悄改成「通用」，与面板上看到的不一致。
+        """
         values = [str(item).strip() for item in persona_ids if str(item).strip()]
         with self._connect() as conn:
             exists = conn.execute(
@@ -495,6 +505,61 @@ class MemoStore:
                 return False
             conn.execute("DELETE FROM memo_persona WHERE memo_id = ?", (memo_id,))
             _write_personas(conn, memo_id, values)
+        self._touch()
+        return True
+
+    def set_persona_blocks(
+        self, memo_id: int, persona_ids: list[str] | tuple[str, ...]
+    ) -> bool:
+        """整体替换「禁用人格」名单；传空表示取消全部禁用。
+
+        禁用优先于可用名单：可用里写着通用（*）时，这里列出的人格照样收不到。
+        """
+        values = [str(item).strip() for item in persona_ids if str(item).strip()]
+        with self._connect() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM memo WHERE id = ?", (memo_id,)
+            ).fetchone()
+            if exists is None:
+                return False
+            conn.execute("DELETE FROM memo_persona_block WHERE memo_id = ?", (memo_id,))
+            conn.executemany(
+                "INSERT INTO memo_persona_block(memo_id, persona_id) VALUES(?, ?) "
+                "ON CONFLICT(memo_id, persona_id) DO NOTHING",
+                [(memo_id, item) for item in _unique(values)],
+            )
+        self._touch()
+        return True
+
+    def add_persona_block(self, memo_id: int, persona_id: str) -> bool:
+        """只追加一条禁用（指令路径用）：已经禁过就什么都不做。"""
+        persona = str(persona_id or "").strip()
+        if not persona:
+            return False
+        with self._connect() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM memo WHERE id = ?", (memo_id,)
+            ).fetchone()
+            if exists is None:
+                return False
+            conn.execute(
+                "INSERT INTO memo_persona_block(memo_id, persona_id) VALUES(?, ?) "
+                "ON CONFLICT(memo_id, persona_id) DO NOTHING",
+                (memo_id, persona),
+            )
+        self._touch()
+        return True
+
+    def remove_persona_block(self, memo_id: int, persona_id: str) -> bool:
+        """取消一条禁用；本来就没禁过也返回 True（幂等）。"""
+        persona = str(persona_id or "").strip()
+        if not persona:
+            return False
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM memo_persona_block WHERE memo_id = ? AND persona_id = ?",
+                (memo_id, persona),
+            )
         self._touch()
         return True
 
@@ -594,7 +659,12 @@ class MemoStore:
                 return None
             return self._row_to_memo(conn, row)
 
-    def page(self, query: PageQuery) -> tuple[list[Memo], int]:
+    def page(self, query: PageQuery, *, with_total: bool = True) -> tuple[list[Memo], int]:
+        """按条件取一页。
+
+        `with_total=False` 时跳过 COUNT：面板按关键词/人格过滤要先扫很多页，
+        每翻一页都数一遍全表纯属浪费，总数由调用方按过滤后的结果自己给。
+        """
         size = max(1, min(MAX_PAGE_SIZE, query.size))
         page = max(1, query.page)
         clauses: list[str] = []
@@ -609,14 +679,18 @@ class MemoStore:
             params.extend([query.label, query.label])
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._connect() as conn:
-            total = int(
-                conn.execute(f"SELECT COUNT(*) AS n FROM memo {where}", params).fetchone()["n"]
-            )
+            total = 0
+            if with_total:
+                total = int(
+                    conn.execute(
+                        f"SELECT COUNT(*) AS n FROM memo {where}", params
+                    ).fetchone()["n"]
+                )
             rows = conn.execute(
                 f"SELECT * FROM memo {where} ORDER BY id DESC LIMIT ? OFFSET ?",
                 [*params, size, (page - 1) * size],
             ).fetchall()
-            memos = [self._row_to_memo(conn, row) for row in rows]
+            memos = self._rows_to_memos(conn, rows)
         return memos, total
 
     def candidates(self, query: CandidateQuery) -> list[Memo]:
@@ -630,13 +704,16 @@ class MemoStore:
             params.append(query.umo)
         persona_clause = ""
         if query.persona_filter:
-            # 显式通用（*）任何会话都能用；绑了人格的命中当前人格才可用
+            # 显式通用（*）任何会话都能用；绑了人格的命中当前人格才可用。
+            # 禁用名单优先：命中就整条排除，哪怕可用名单里写着 *。
             if query.persona_id:
                 persona_clause = (
+                    " AND NOT EXISTS (SELECT 1 FROM memo_persona_block mb"
+                    " WHERE mb.memo_id = memo.id AND mb.persona_id = ?)"
                     " AND EXISTS (SELECT 1 FROM memo_persona mp WHERE mp.memo_id = memo.id"
                     " AND (mp.persona_id = ? OR mp.persona_id = ?))"
                 )
-                params.extend([GENERIC_PERSONA, query.persona_id])
+                params.extend([query.persona_id, GENERIC_PERSONA, query.persona_id])
             else:
                 persona_clause = (
                     " AND EXISTS (SELECT 1 FROM memo_persona mp WHERE mp.memo_id = memo.id"
@@ -657,7 +734,7 @@ class MemoStore:
                 "ORDER BY created_at DESC, id DESC LIMIT ?",
                 [*params, limit],
             ).fetchall()
-            return [self._row_to_memo(conn, row) for row in rows]
+            return self._rows_to_memos(conn, rows)
 
     def labels_in_use(self) -> dict[str, int]:
         """主标签 + 附加标签的实际分布（调标签体系时看这个）。"""
@@ -723,22 +800,16 @@ class MemoStore:
 
     # -- 行映射 -----------------------------------------------------------
 
-    def _row_to_memo(self, conn: sqlite3.Connection, row: sqlite3.Row) -> Memo:
-        memo_id = int(row["id"])
-        scenes = tuple(
-            str(item["scene"])
-            for item in conn.execute(
-                "SELECT scene FROM memo_scene WHERE memo_id = ?", (memo_id,)
-            ).fetchall()
-        )
-        labels = tuple(
-            str(item["label"])
-            for item in conn.execute(
-                "SELECT label FROM memo_label WHERE memo_id = ? ORDER BY label", (memo_id,)
-            ).fetchall()
-        )
+    @staticmethod
+    def _memo_from_row(
+        row: sqlite3.Row,
+        scenes: tuple[str, ...],
+        labels: tuple[str, ...],
+        persona_ids: tuple[str, ...],
+        blocked_persona_ids: tuple[str, ...],
+    ) -> Memo:
         return Memo(
-            id=memo_id,
+            id=int(row["id"]),
             rel_path=str(row["rel_path"]),
             content_hash=str(row["content_hash"]),
             percept_hash=row["percept_hash"],
@@ -755,8 +826,61 @@ class MemoStore:
             origin_kind=row["origin_kind"],
             scenes=scenes,
             labels=labels,
-            persona_ids=_read_personas(conn, int(row["id"])),
+            persona_ids=persona_ids,
+            blocked_persona_ids=blocked_persona_ids,
         )
+
+    def _rows_to_memos(
+        self, conn: sqlite3.Connection, rows: list[sqlite3.Row]
+    ) -> list[Memo]:
+        """批量装配：一次取齐这一批的关联表，而不是每行三次子查询。
+
+        面板搜索最多要过滤 1000 行，按行查是 3000 次查询；这里固定 4 次。
+        """
+        if not rows:
+            return []
+        ids = [int(row["id"]) for row in rows]
+        placeholders = ",".join("?" for _ in ids)
+        scenes: dict[int, list[str]] = {}
+        for item in conn.execute(
+            f"SELECT memo_id, scene FROM memo_scene WHERE memo_id IN ({placeholders})", ids
+        ).fetchall():
+            scenes.setdefault(int(item["memo_id"]), []).append(str(item["scene"]))
+        labels: dict[int, list[str]] = {}
+        for item in conn.execute(
+            f"SELECT memo_id, label FROM memo_label WHERE memo_id IN ({placeholders})"
+            " ORDER BY label",
+            ids,
+        ).fetchall():
+            labels.setdefault(int(item["memo_id"]), []).append(str(item["label"]))
+        personas: dict[int, list[str]] = {}
+        for item in conn.execute(
+            f"SELECT memo_id, persona_id FROM memo_persona WHERE memo_id IN ({placeholders})"
+            " ORDER BY persona_id",
+            ids,
+        ).fetchall():
+            personas.setdefault(int(item["memo_id"]), []).append(str(item["persona_id"]))
+        blocked: dict[int, list[str]] = {}
+        for item in conn.execute(
+            "SELECT memo_id, persona_id FROM memo_persona_block"
+            f" WHERE memo_id IN ({placeholders}) ORDER BY persona_id",
+            ids,
+        ).fetchall():
+            blocked.setdefault(int(item["memo_id"]), []).append(str(item["persona_id"]))
+        return [
+            self._memo_from_row(
+                row,
+                tuple(scenes.get(int(row["id"]), ())),
+                tuple(labels.get(int(row["id"]), ())),
+                tuple(personas.get(int(row["id"]), ())),
+                tuple(blocked.get(int(row["id"]), ())),
+            )
+            for row in rows
+        ]
+
+    def _row_to_memo(self, conn: sqlite3.Connection, row: sqlite3.Row) -> Memo:
+        """单行装配（get 这类只取一条的路径用；列表路径走 `_rows_to_memos`）。"""
+        return self._rows_to_memos(conn, [row])[0]
 
 
 def _unique(items: list[str]) -> list[str]:
@@ -790,11 +914,3 @@ def _write_personas(
         "ON CONFLICT(memo_id, persona_id) DO NOTHING",
         [(memo_id, item) for item in _unique(list(persona_ids))],
     )
-
-
-def _read_personas(conn: sqlite3.Connection, memo_id: int) -> tuple[str, ...]:
-    rows = conn.execute(
-        "SELECT persona_id FROM memo_persona WHERE memo_id = ? ORDER BY persona_id",
-        (memo_id,),
-    ).fetchall()
-    return tuple(str(row["persona_id"]) for row in rows)

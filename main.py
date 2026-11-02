@@ -21,14 +21,16 @@ from .commands import CommandRunner
 from .config import (
     COMMAND_NAME,
     LOG_TAG,
+    PERCEPT_THRESHOLD,
     PLUGIN_NAME,
     Settings,
     deprecated_keys,
     load_settings,
 )
 from .domain import STATE_READY, CandidateQuery, MediaRef, Reason
-from .ingest import analyze
+from .ingest import analyze, dedup
 from .ingest.collect import plan_collect, collect_refs
+from .ingest.fetch import FetchLimits, fetch_media
 from .ingest.pipeline import IngestContext, IngestPipeline
 from .ingest.throttle import Throttle
 from .publish import gate, pick, sender
@@ -48,6 +50,8 @@ COLLECT_PRIORITY = 10_000
 DECORATE_PRIORITY = -1_000
 TMP_CLEAN_INTERVAL = 30 * 60
 CAPACITY_INTERVAL = 60 * 60
+CACHE_MAX_AGE = 24 * 60 * 60
+"""压缩缓存产物的保留时长：过期才清，避免每次发送都重新压一遍。"""
 COMMAND_MARK = "_memenest_command_turn"
 """本回合是指令交互：不补发表情，避免打断管理操作。"""
 # `label_extraction=llm` 时用：只要情绪 key，不要解释，省 token 也省解析
@@ -91,7 +95,6 @@ class Main(Star):
         self._handles = tools_core.HandleRegistry()
         self._collect_override: bool | None = None
         self._collect_restore_task: asyncio.Task[None] | None = None
-        self._cap_override: int | None = None
         self._model_provider_id = ""
         self._prompt = _load_prompt()
         self._maintenance: list[asyncio.Task[None]] = []
@@ -194,7 +197,7 @@ class Main(Star):
 
     async def _maintenance_loop(self, interval: int, action: Any) -> None:
         while True:
-            # 首轮先等待一个周期，不在启动瞬间就动磁盘（SPEC 第 6 章）。
+            # 首轮先等待一个周期，不在启动瞬间就动磁盘。
             await asyncio.sleep(interval)
             try:
                 await action()
@@ -214,13 +217,87 @@ class Main(Star):
 
         parsed = commands_core.parse_command(event.get_message_str(), self.command_name())
         if parsed is not None:
-            text = await self._runner.run(event, parsed)
             event.set_extra(COMMAND_MARK, True)
-            event.set_result(MessageEventResult().message(text))
-            # 只禁止默认 LLM 请求：不 stop，否则 Respond 阶段不会发送这条回复。
-            event.should_call_llm(True)
+            # 带唤醒前缀 / 被 @ 的消息交给下面注册的 command_group 执行——只有那样
+            # 指令才会出现在 WebUI 指令列表与 /help 里。这里只处理 command filter
+            # 覆盖不到的写法：不带前缀的「memenest xxx」，以及只发一个「/memenest」。
+            if parsed.default or not getattr(event, "is_at_or_wake_command", False):
+                text = await self._runner.run(event, parsed)
+                if text:
+                    event.set_result(MessageEventResult().message(text))
+                # True = 禁止本回合的默认 LLM 请求（接口名反直觉，语义见宿主 docstring）
+                event.should_call_llm(True)
             return
         await self._collect(event)
+
+    # -- 指令组 -----------------------------------------------------------
+    # 必须用宿主装饰器注册：只有注册过的指令才会出现在 WebUI 指令列表与 /help 里，
+    # 也才会被宿主的指令管理页识别。on_any_message 里的手写解析只兜它覆盖不到的写法。
+
+    @filter.command_group("memenest")
+    def memenest_group(self) -> None:
+        """表情窝：收集、审核、发图与人格绑定。"""
+
+    async def _run_command(
+        self, event: AstrMessageEvent, sub: str, args: tuple[str, ...] = ()
+    ) -> str:
+        """执行一条子命令，并禁止本回合的默认 LLM 请求。
+
+        `should_call_llm(True)` 的语义是「禁止默认 LLM 请求」（接口名反直觉），
+        不这样设的话指令回复发出去之后还会再来一轮 LLM 生成。
+        """
+        event.should_call_llm(True)
+        event.set_extra(COMMAND_MARK, True)
+        return await self._runner.run(event, commands_core.ParsedCommand(sub, args))
+
+    @memenest_group.command("status")
+    async def memenest_status(self, event: AstrMessageEvent):
+        """查看库存、队列与向量覆盖率。"""
+        text = await self._run_command(event, "status")
+        if text:
+            yield event.plain_result(text)
+
+    @memenest_group.command("help")
+    async def memenest_help(self, event: AstrMessageEvent):
+        """列出可用子命令。"""
+        yield event.plain_result(commands_core.render_help(self.command_name()))
+
+    @memenest_group.command("grab")
+    async def memenest_grab(self, event: AstrMessageEvent):
+        """引用一条带图的消息，把那张图收进库。"""
+        text = await self._run_command(event, "grab")
+        if text:
+            yield event.plain_result(text)
+
+    @memenest_group.command("on")
+    async def memenest_on(self, event: AstrMessageEvent, minutes: str = ""):
+        """临时开启收集，可带分钟数。"""
+        args = (minutes,) if str(minutes).strip() else ()
+        text = await self._run_command(event, "on", args)
+        if text:
+            yield event.plain_result(text)
+
+    @memenest_group.command("off")
+    async def memenest_off(self, event: AstrMessageEvent, minutes: str = ""):
+        """临时关闭收集，可带分钟数。"""
+        args = (minutes,) if str(minutes).strip() else ()
+        text = await self._run_command(event, "off", args)
+        if text:
+            yield event.plain_result(text)
+
+    @memenest_group.command("mute")
+    async def memenest_mute(self, event: AstrMessageEvent):
+        """把表情和指令一起发（或引用一张），对当前人格禁用它。"""
+        text = await self._run_command(event, "mute")
+        if text:
+            yield event.plain_result(text)
+
+    @memenest_group.command("unmute")
+    async def memenest_unmute(self, event: AstrMessageEvent):
+        """恢复这张表情在当前人格下的可用。"""
+        text = await self._run_command(event, "unmute")
+        if text:
+            yield event.plain_result(text)
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, response: Any) -> None:
@@ -239,6 +316,10 @@ class Main(Star):
             # 指令回合整轮不发表情（回复文本本身不是命令，靠标记而不是文本判断）。
             return
         result = event.get_result()
+        if not gate.result_is_model_reply(result):
+            # 命令回复与其他插件主动发的文本不配表情：用宿主给的结果类型判定，
+            # 不再靠文本前缀猜（前缀只作为闸内兜底）。
+            return
         chain = getattr(result, "chain", None) if result is not None else None
         text = gate.reply_text(chain) or fallback_text
         if not text:
@@ -384,7 +465,7 @@ class Main(Star):
     def remove_rel_file(self, rel_path: str) -> None:
         target = resolve_within(self.data_dir, rel_path)
         if target is None:
-            logger.warning("memenest: 拒绝删除越界路径 rel=%s", rel_path)
+            logger.warning("[MemeNest] 拒绝删除越界路径 rel=%s", rel_path)
             return
         try:
             target.unlink(missing_ok=True)
@@ -426,27 +507,18 @@ class Main(Star):
         return COMMAND_NAME
 
     def _settings(self) -> Settings:
-        # 配置分组只是界面结构，load_settings 负责展平；运行期开关用 replace 覆盖。
+        """读一次配置并叠加运行期开关（`/memenest on|off` 的临时状态）。
+
+        配置分组只是界面结构，load_settings 已经展平；这里只覆盖会被运行时改动的那一项，
+        其余直接返回快照，避免每条消息都重建一次。
+        """
         base = load_settings(self.config)
         collect_enabled = (
             base.collect_enabled if self._collect_override is None else self._collect_override
         )
-        auto_send = (
-            base.send_enabled
-        )
-        cap = base.library_cap if self._cap_override is None else self._cap_override
-        if (
-            collect_enabled is base.collect_enabled
-            and auto_send is base.send_enabled
-            and cap == base.library_cap
-        ):
+        if collect_enabled is base.collect_enabled:
             return base
-        return replace(
-            base,
-            collect_enabled=collect_enabled,
-            send_enabled=auto_send,
-            library_cap=cap,
-        )
+        return replace(base, collect_enabled=collect_enabled)
 
     def collect_enabled(self) -> bool:
         return self._settings().collect_enabled
@@ -551,16 +623,82 @@ class Main(Star):
         logger.info("%s 引用收录 queued=%s dropped=%s", self._tag(), result.queued, result.dropped)
         return result.queued, result.dropped
 
-    def collect_existing_files(self) -> set[str]:
-        found: set[str] = set()
-        for folder in ("blobs", "inbox"):
-            root = self.data_dir / folder
-            if not root.exists():
+    async def mute_for_persona(
+        self, sources: list[str], umo: str, *, enabled: bool = True
+    ) -> dict[str, Any]:
+        """按图片定位库里的表情，对**当前人格**加/取消禁用。
+
+        定位先认字节哈希，再认感知指纹：指令多半是引用 BOT 刚发出去的那张，
+        而那是压缩产物，字节与原图不同，只能靠指纹认（实测距离 0–3，阈值 8）。
+        """
+        if not sources:
+            return {"ok": False, "code": "no_image"}
+        persona_id = self._resolve_persona_id(umo)
+        if not persona_id:
+            return {"ok": False, "code": "no_persona"}
+        memo_id, code = await self._locate_memo_by_sources(sources)
+        if memo_id is None:
+            return {"ok": False, "code": code}
+        if enabled:
+            done = await asyncio.to_thread(
+                self.store.add_persona_block, memo_id, persona_id
+            )
+        else:
+            done = await asyncio.to_thread(
+                self.store.remove_persona_block, memo_id, persona_id
+            )
+        if not done:
+            return {"ok": False, "code": "write_failed"}
+        logger.info(
+            "%s 人格禁用变更 memo=%s enabled=%s", self._tag(), memo_id, enabled
+        )
+        logger.debug("%s 人格禁用变更 persona=%s", self._tag(), persona_id)
+        return {"ok": True, "code": "ok", "memo_id": memo_id}
+
+    async def _locate_memo_by_sources(self, sources: list[str]) -> tuple[int | None, str]:
+        settings = self._settings()
+        limits = FetchLimits(
+            max_bytes=settings.max_bytes, max_pixels=settings.max_pixels
+        )
+        last_reason = ""
+        for source in sources[:4]:
+            ref = MediaRef(
+                source=source,
+                declared_ext="",
+                origin_kind="force",
+                platform="panel",
+                reason="mute_lookup",
+            )
+            fetched = await fetch_media(ref, limits, self.data_dir / "tmp")
+            if not fetched.ok or fetched.media is None:
+                # 记下来：下载失败和「库里没有」是两回事，不能都回成同一句文案
+                last_reason = fetched.reason
                 continue
-            for path in root.rglob("*"):
-                if path.is_file():
-                    found.add(path.relative_to(self.data_dir).as_posix())
-        return found
+            media = fetched.media
+            try:
+                memo_id = await asyncio.to_thread(
+                    self.store.match_content_hash, media.content_hash
+                )
+                if memo_id is None:
+                    verdict = await asyncio.to_thread(
+                        dedup.find_duplicate,
+                        self.store,
+                        media.content_hash,
+                        media.percept_hash,
+                        PERCEPT_THRESHOLD,
+                    )
+                    memo_id = verdict.existing_id
+            finally:
+                try:
+                    media.path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if memo_id is not None:
+                return memo_id, "ok"
+        if last_reason:
+            logger.debug("%s 表情定位失败 reason=%s", self._tag(), last_reason)
+            return None, "fetch_failed"
+        return None, "not_found"
 
     async def enforce_capacity(self) -> int:
         pipeline = self._pipeline
@@ -571,7 +709,9 @@ class Main(Star):
         pipeline = self._pipeline
         if pipeline is not None:
             removed += await asyncio.to_thread(pipeline.clear_tmp, 300.0)
-        removed += await asyncio.to_thread(clear_cache, self.data_dir / CACHE_SUBDIR)
+        removed += await asyncio.to_thread(
+            clear_cache, self.data_dir / CACHE_SUBDIR, CACHE_MAX_AGE
+        )
         removed += await asyncio.to_thread(self._purge_imports)
         return removed
 
@@ -680,6 +820,9 @@ class Main(Star):
         covered, expected = await asyncio.to_thread(store.embedding_coverage, model, dim)
         self._reindex = {"running": True, "done": covered, "total": expected}
         written = failed = 0
+        # 进度按「条目」算，和 expected 同量纲：written 是向量行数（一条最多 3 行），
+        # 拿它直接加会出现 120/100 这种超量显示。
+        filled: set[int] = set()
         # 算不出来的条目会被 missing_embedding_memos 反复返回（向量没写进库），
         # 必须自己记账跳过，否则就是一个永远打 provider 的死循环。
         skipped: set[int] = set()
@@ -722,11 +865,16 @@ class Main(Star):
                 if rows:
                     await asyncio.to_thread(store.save_embeddings, rows, int(time.time()))
                     written += len(rows)
+                    filled.update(got)
                 self._vectors.invalidate()
-                self._reindex["done"] = covered + written
+                self._reindex["done"] = covered + len(filled)
                 await asyncio.sleep(0)  # 让出控制权，别卡消息处理
         finally:
-            self._reindex = {"running": False, "done": covered + written, "total": expected}
+            self._reindex = {
+                "running": False,
+                "done": covered + len(filled),
+                "total": expected,
+            }
         logger.info(
             "%s 向量回填完成 written=%s failed=%s total=%s",
             self._tag(),

@@ -44,3 +44,22 @@ def test_is_upload_job_rejects_non_hex():
 
     for bad in ["../evil", "..", "", "a" * 31, "A" * 32, "a/b", "a" * 32 + "b", None]:
         assert not core.is_upload_job(bad), bad
+
+
+def test_persona_params_keeps_allow_and_block_apart():
+    """两个名单互相独立：只传禁用时不能把可用名单悄悄清空。
+
+    写坏的表现是「禁用一个人格，结果整条变成谁都不用」——界面上只显示禁用徽章，
+    可用名单的变化要专门去看才发现。
+    """
+    allow, block = core.persona_params({"block_persona_ids": ["p1"]})
+    assert allow is None, "没传可用名单 = 不动它"
+    assert block == ["p1"]
+
+    allow, block = core.persona_params({"persona_ids": ["*"], "block_persona_ids": ""})
+    assert allow == ["*"]
+    assert block == []
+
+    # 逗号串与数组等价；none/clear 表示清空，不是「一个叫 none 的人格」
+    assert core.persona_params({"persona_ids": "p1，p2"}) == (["p1", "p2"], None)
+    assert core.persona_params({"persona_ids": "none"}) == ([], None)

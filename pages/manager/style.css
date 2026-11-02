@@ -778,6 +778,12 @@ input[type="checkbox"] {
   opacity: 0.7;
 }
 
+/* 禁用人格徽章：和「可用」同区展示，用告警色区分 */
+.badge.persona.block {
+  color: var(--danger);
+  opacity: 0.85;
+}
+
 .badge.is-fav {
   color: var(--accent);
   opacity: 0.8;
@@ -1051,19 +1057,69 @@ input[type="checkbox"] {
   gap: 6px;
 }
 
-/* 通用独占一行，和具体人格分开 */
-.persona-generic {
+/* 人格绑定：一个列表三态（默认 / 可用 / 禁用），配搜索与限高。
+   以前是「可用」「禁用」两份完整人格列表，几十个人格等于两倍噪音。 */
+.persona-tools {
   display: flex;
-  margin-bottom: 14px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--line);
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
 }
 
-/* 人格可能有几十个：区域限高滚动，避免弹层被撑爆 */
-.persona-chips {
-  max-height: 46vh;
+.persona-tools input[type="search"] {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--ink);
+  font: 400 12px/1.3 var(--font-ui);
+}
+
+/* 通用开关与搜索框等高，别让左侧一小块看着悬空 */
+.persona-tools .chip-toggle {
+  height: 30px;
+  padding: 0 14px;
+  border-radius: 999px;
+}
+
+.persona-grid {
+  max-height: 40vh;
   overflow-y: auto;
-  padding-right: 4px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.tri-chip {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 可用：强调色实底；禁用：告警色 + 删除线，一眼看出是「不发」 */
+.tri-chip.allow {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.tri-chip.block {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+  color: var(--danger);
+  text-decoration: line-through;
+}
+
+.persona-summary {
+  margin: 10px 0 0;
+  min-height: 16px;
+  font: 400 11px/1.6 var(--font-ui);
+  color: var(--muted);
+  word-break: break-all;
 }
 
 .modal-hint {
@@ -1097,6 +1153,13 @@ input[type="checkbox"] {
 /* 通用：和具体人格互斥，选中时用绿色，视觉上区别于「给谁用」 */
 .chip-toggle.generic {
   font-weight: 600;
+}
+
+/* 禁用人格：选中用告警色，和「可用」的强调色区分开 */
+.chip-toggle.block.on {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
 }
 
 .chip-toggle.generic.on {

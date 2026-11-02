@@ -89,7 +89,7 @@ class CandidateCache:
             self._entries[key] = _Entry(items=items, epoch=epoch, loaded_at=now)
             if self._log is not None:
                 self._log.debug(
-                    "memenest: 候选缓存加载 persona=%s label=%s count=%s",
+                    "[MemeNest] 候选缓存加载 persona=%s label=%s count=%s",
                     persona_key,
                     label,
                     len(items),

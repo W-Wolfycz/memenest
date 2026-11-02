@@ -81,7 +81,7 @@ class VectorStore:
             self._vectors = vectors
             if self._log is not None:
                 self._log.debug(
-                    "memenest: 向量索引加载 model=%s dim=%s 条目=%s 行=%s",
+                    "[MemeNest] 向量索引加载 model=%s dim=%s 条目=%s 行=%s",
                     model,
                     dim,
                     len(vectors),

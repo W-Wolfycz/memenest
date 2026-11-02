@@ -9,7 +9,7 @@ from typing import Any
 
 PAGE_SIZE_DEFAULT = 10
 READ_SUBS: frozenset[str] = frozenset({"status", "help"})
-WRITE_SUBS: frozenset[str] = frozenset({"on", "off", "grab"})
+WRITE_SUBS: frozenset[str] = frozenset({"on", "off", "grab", "mute", "unmute"})
 ALL_SUBS = READ_SUBS | WRITE_SUBS
 LEADING_MARKS = ("/", "!", "！", "／", "#", ".")
 _MENTION = re.compile(r"^(?:@\S+\s+)+")
@@ -20,6 +20,9 @@ class ParsedCommand:
     sub: str
     args: tuple[str, ...] = ()
     raw_args: str = ""
+    default: bool = False
+    """没写子命令（只发了 `/memenest`）：默认按 status 处理，同时用来判定
+    「这条消息命中的是哪个指令」——宿主的 command filter 不会匹配这种写法。"""
 
     @property
     def is_write(self) -> bool:
@@ -45,7 +48,7 @@ def parse_command(text: str, command_name: str) -> ParsedCommand | None:
         return None
     rest = (match.group(1) or "").strip()
     if not rest:
-        return ParsedCommand("status")
+        return ParsedCommand("status", default=True)
     parts = rest.split()
     sub = parts[0].lower()
     if sub not in ALL_SUBS:
@@ -59,6 +62,8 @@ def render_help(command_name: str) -> str:
         [
             f"表情窝（/{command_name}）：",
             "  grab          引用一条带图的消息，把那张图收进来",
+            "  mute          发/引用一张表情，对当前人格禁用它",
+            "  unmute        发/引用一张表情，恢复它在当前人格下的可用",
             "  on [分钟]     临时开启收集，不给分钟数就本次运行有效",
             "  off [分钟]    临时关闭收集，已排队的任务会跑完",
             "  status        看库存与运行状态",

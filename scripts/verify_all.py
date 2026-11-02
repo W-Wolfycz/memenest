@@ -22,6 +22,9 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PLUGIN_PY = ROOT / "panel.py"
 APP_JS = ROOT / "pages" / "manager" / "app.js"
+DEFAULT_PLUGIN_DIR = pathlib.Path(
+    r"C:\Users\Administrator\.astrbot\data\plugins\memenest"
+)
 
 results: list[tuple[bool, str, str]] = []
 
@@ -324,13 +327,21 @@ def check_js() -> None:
 
 # ------------------------------------------------------- 9. 部署一致性
 def check_deploy() -> None:
+    """判定项查**源码**；部署端只做提示。
+
+    以前这里不带参数调 verify_deploy.py，它默认查的是部署端那份拷贝——
+    改完还没同步时，这一项等于在检查上一版代码，源码侧的加载问题永远查不出来。
+    """
     script = ROOT / "scripts" / "verify_deploy.py"
     if not script.is_file():
-        record(True, "部署端一致", "跳过（没有 verify_deploy.py）")
+        record(True, "源码可被宿主加载", "跳过（没有 verify_deploy.py）")
         return
-    proc = _run([sys.executable, str(script)])
+    proc = _run([sys.executable, str(script), str(ROOT)])
     tail = [line for line in (proc.stdout or "").strip().splitlines() if line.strip()]
-    record(proc.returncode == 0, "部署端一致", tail[-1] if tail else "")
+    record(proc.returncode == 0, "源码可被宿主加载", tail[-1] if tail else "")
+    # 部署端可能还没同步，不作为失败项，只在输出里留一行状态
+    if DEFAULT_PLUGIN_DIR.is_dir() and DEFAULT_PLUGIN_DIR != ROOT:
+        _run([sys.executable, str(script)])
 
 
 # --------------------------------------------------------------- main

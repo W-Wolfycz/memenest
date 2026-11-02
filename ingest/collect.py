@@ -164,6 +164,22 @@ def component_source(comp: Any) -> str:
     return ""
 
 
+def image_sources(event: Any) -> list[str]:
+    """消息自带的图片 + 引用消息里的图片，按这个顺序去重返回。
+
+    指令入口用：用户既可以「把图和指令一起发」，也可以引用一条带图的消息。
+    """
+    found: list[str] = []
+    for comp in image_components(event):
+        source = component_source(comp)
+        if source and source not in found:
+            found.append(source)
+    for source in quoted_image_sources(event):
+        if source and source not in found:
+            found.append(source)
+    return found
+
+
 # ---------------------------------------------------------------------------
 # 判定（R-1）
 # ---------------------------------------------------------------------------

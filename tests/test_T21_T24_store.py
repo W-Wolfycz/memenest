@@ -61,6 +61,8 @@ def test_T24_url_checks():
     assert check_url("file:///etc/passwd") == (False, "url_scheme_denied")
     assert check_url("gopher://example.com/") == (False, "url_scheme_denied")
     assert check_url("https://cdn.example.com/a.png") == (True, "url_ok")
+    # 公网 IP 的标准点分十进制是正常来源，不能和「非标准数字写法」一起拦掉
+    assert check_url("http://1.2.3.4/a.png") == (True, "url_ok")
     assert check_url("") == (False, "url_empty")
 
 

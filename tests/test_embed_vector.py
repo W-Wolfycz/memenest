@@ -214,17 +214,8 @@ async def test_scene_hit_works_from_reply_side(tmp_path):
             )
     pool = [memo for memo in store.candidates(_query())]
 
-    # 只给 scene 权重，其余三路关掉：命中与否全看话题词那一路
-    settings = load_settings(
-        {
-            "embedding_enabled": True,
-            "embedding_threshold": 0.0,
-            "weight_text": 0.0,
-            "weight_caption": 0.0,
-            "weight_scenes": 1.0,
-            "weight_label": 0.0,
-        }
-    )
+    # 权重是写死的固定值（见 config.WEIGHT_*），这里只需要打开语义检索
+    settings = load_settings({"embedding_enabled": True})
     embedder = emb.Embedder(provider=provider, model="m", timeout=5.0)
     dispatcher, _, _ = _build(store, settings, lambda: embedder, tmp_path)
 
@@ -253,4 +244,53 @@ async def test_scene_hit_works_from_reply_side(tmp_path):
         picks2.append(memo.label if memo else None)
     share2 = picks2.count("laugh") / len(picks2)
     assert share2 > 0.9, f"用户命中话题词时应该几乎总选中它，实际只占 {share2:.0%}"
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_embedding_min_similarity_blocks_weak_matches(tmp_path):
+    """最高分低于「语义相似度下限」时这回合不发。
+
+    这个开关的失效是双向静默的：没接线时会照发（下限形同虚设），
+    判反了会把正常命中一起挡掉（表情突然再也不发了，日志里只有 debug）。
+    """
+    store = MemoStore(tmp_path / "memo.db")
+    store.initialize()
+    # 查询「狗」与这张图的向量点积 = 0.6：刚好卡在「能选到」和「不该发」之间
+    provider = FakeProvider(
+        table={"狗": [0.6, 0.8, 0.0, 0.0], "猫": [1.0, 0.0, 0.0, 0.0]}
+    )
+    memo_id = store.add(
+        Draft(
+            rel_path="blobs/1.png",
+            content_hash="1" * 64,
+            percept_hash=None,
+            analysis=Analysis(label="blank", caption="猫"),
+            scope="any",
+            origin_umo=None,
+            origin_kind="import",
+            created_at=1,
+            state=STATE_READY,
+        )
+    )
+    vec = emb.normalize(await provider.get_embedding("猫"))
+    store.save_embeddings([(memo_id, "caption", "m", len(vec), emb.pack(vec))], 1)
+    pool = [memo for memo in store.candidates(_query())]
+    embedder = emb.Embedder(provider=provider, model="m", timeout=5.0)
+
+    off = load_settings({"embedding_enabled": True})
+    dispatcher_off, _, _ = _build(store, off, lambda: embedder, tmp_path)
+    memo, decided = await dispatcher_off._pick_by_vector(
+        pool, "狗", "狗", "umo", [], None, False
+    )
+    assert decided is True
+    assert memo is not None, "下限关着的时候不该挡候选"
+
+    on = load_settings({"embedding_enabled": True, "embedding_min_similarity": 0.9})
+    dispatcher_on, _, _ = _build(store, on, lambda: embedder, tmp_path)
+    memo2, decided2 = await dispatcher_on._pick_by_vector(
+        pool, "狗", "狗", "umo", [], None, False
+    )
+    assert decided2 is True, "向量路已经做出决定，不能回落到关键词硬凑一张"
+    assert memo2 is None
     store.close()

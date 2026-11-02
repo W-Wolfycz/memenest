@@ -29,7 +29,7 @@ MAX_TERM_COUNT = 12
 MAX_TERM_LEN = 20
 THUMB_MAX_SIDE = 200
 THUMB_QUALITY = 78
-THUMB_CACHE_ENTRIES = 1024
+THUMB_CACHE_ENTRIES = 2048
 PAGE_SIZE_DEFAULT = 12
 PAGE_SIZE_MAX = 48
 ALLOWED_UPLOAD_EXTS: tuple[str, ...] = (
@@ -81,8 +81,8 @@ def parse_page_args(get: Callable[..., Any] | None) -> PageArgs:
     if state not in ALLOWED_STATES:
         state = None
     label = read("label").lower() or None
+    # `__none__` 是前端「只看通用」的哨兵值，原样保留，不能归一成空串
     persona = read("persona") or None
-    """`__none__` 是前端「只看通用」的哨兵值，不能归一成空串。"""
     keyword = read("q")[:64]
     return PageArgs(
         page=page,
@@ -140,6 +140,33 @@ def import_params(
 UPLOAD_JOB_RE = re.compile(r"[0-9a-f]{32}")
 
 
+def _persona_list(value: Any) -> list[str]:
+    """人格 id 列表：接受数组或逗号串；`none`/`clear`/空 表示清空。"""
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value or "").strip()
+    if text.lower() in ("none", "clear", "", "-"):
+        return []
+    return [part.strip() for part in text.replace("，", ",").split(",") if part.strip()]
+
+
+def persona_params(body: dict[str, Any]) -> tuple[list[str] | None, list[str] | None]:
+    """解析 (可用名单, 禁用人格名单)；字段没传时返回 None，表示这一项不动。
+
+    两个名单互相独立：可用名单里的 `*` 是「通用」，禁用人格按 id 记，判定时禁用优先。
+    只传禁用就等于「原本通用的表情，只是这一个人格不发」，不需要枚举其他人格。
+    """
+    allow: list[str] | None = None
+    if "persona_ids" in body:
+        allow = _persona_list(body.get("persona_ids"))
+    elif "persona_id" in body:
+        allow = _persona_list(body.get("persona_id"))
+    block: list[str] | None = None
+    if "block_persona_ids" in body:
+        block = _persona_list(body.get("block_persona_ids"))
+    return allow, block
+
+
 def is_upload_job(job: str) -> bool:
     """上传返回的 job 必须是 32 位小写 hex（uuid4().hex）。
 
@@ -192,6 +219,7 @@ def serialize_memo(memo: Memo) -> dict[str, Any]:
         "scope": memo.scope,
         "persona_ids": [pid for pid in memo.persona_ids if pid != GENERIC_PERSONA],
         "persona_generic": GENERIC_PERSONA in memo.persona_ids,
+        "blocked_personas": list(memo.blocked_persona_ids),
         "has_origin": bool(memo.origin_umo),
         "is_fav": memo.is_fav,
         "use_count": memo.use_count,
@@ -225,6 +253,23 @@ def filter_memos(memos: list[Memo], keyword: str, persona: str | None) -> list[M
     return result
 
 
+def _flatten_to_rgb(image: object) -> object:
+    """转成不透明的 RGB；只有真带透明通道的图才走白底合成。
+
+    以前不分青红皂白先 convert("RGBA") 再建白底画布再 paste：
+    一张 3840×2161 的 RGB 图光这两步就要 100ms，而它本来就不需要。
+    """
+    from PIL import Image
+
+    mode = getattr(image, "mode", "RGB")
+    if mode not in ("RGBA", "LA", "P", "PA"):
+        return image.convert("RGB")  # type: ignore[attr-defined]
+    frame = image.convert("RGBA")  # type: ignore[attr-defined]
+    canvas = Image.new("RGB", frame.size, (255, 255, 255))
+    canvas.paste(frame, mask=frame.split()[-1])
+    return canvas
+
+
 def thumb_bytes(source: Path, max_side: int = THUMB_MAX_SIDE) -> bytes | None:
     """生成 JPEG 缩略图字节；任何失败都返回 None，由前端显示占位。"""
     try:
@@ -235,9 +280,7 @@ def thumb_bytes(source: Path, max_side: int = THUMB_MAX_SIDE) -> bytes | None:
         with Image.open(source) as image:
             if int(getattr(image, "n_frames", 1)) > 1:
                 image.seek(0)
-            frame = image.convert("RGBA")
-            canvas = Image.new("RGB", frame.size, (255, 255, 255))
-            canvas.paste(frame, mask=frame.split()[-1])
+            canvas = _flatten_to_rgb(image)
             canvas.thumbnail((max_side, max_side), Image.LANCZOS)
             buffer = BytesIO()
             canvas.save(buffer, format="JPEG", quality=THUMB_QUALITY, optimize=True)
@@ -248,6 +291,9 @@ def thumb_bytes(source: Path, max_side: int = THUMB_MAX_SIDE) -> bytes | None:
 
 PREVIEW_MAX_SIDE = 960
 PREVIEW_MAX_ANIMATED_BYTES = 8 * 1024 * 1024
+PREVIEW_CACHE_ENTRIES = 64
+# 超过这个像素量才值得调 draft()：小图 draft 反而多一次解码器交互
+PREVIEW_SOFT_PIXELS = 4_000_000
 MIME_BY_SUFFIX = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -259,8 +305,12 @@ MIME_BY_SUFFIX = {
 }
 
 
-def preview_payload(source: Path, max_side: int = PREVIEW_MAX_SIDE) -> dict[str, Any] | None:
-    """预览用载荷：动图直接给原文件（保留动画），静态图给白底大尺寸 JPEG。"""
+def preview_bytes(source: Path, max_side: int = PREVIEW_MAX_SIDE) -> tuple[bytes, str] | None:
+    """预览图字节：动图直接给原文件（保留动画），静态图给白底大尺寸 JPEG。
+
+    超大图先用 `draft()` 让解码器直接降采样：一张 8000×8000 的 JPEG 全解要
+    192MB 位图和几十秒，draft 之后只解出目标尺寸附近的图，快一个数量级。
+    """
     try:
         from PIL import Image
 
@@ -271,20 +321,19 @@ def preview_payload(source: Path, max_side: int = PREVIEW_MAX_SIDE) -> dict[str,
         with Image.open(source) as image:
             animated = int(getattr(image, "n_frames", 1)) > 1
             if animated and size <= PREVIEW_MAX_ANIMATED_BYTES:
-                return {
-                    "mime": MIME_BY_SUFFIX.get(suffix, "image/gif"),
-                    "image": base64.b64encode(source.read_bytes()).decode("ascii"),
-                }
-            frame = image.convert("RGBA")
-            canvas = Image.new("RGB", frame.size, (255, 255, 255))
-            canvas.paste(frame, mask=frame.split()[-1])
+                return source.read_bytes(), MIME_BY_SUFFIX.get(suffix, "image/gif")
+            width, height = image.size
+            if width * height > PREVIEW_SOFT_PIXELS:
+                # 只对 JPEG 有效；PNG/WebP 的 draft 是空操作，靠下面的统一缩放兜底
+                try:
+                    image.draft("RGB", (max_side, max_side))
+                except Exception:
+                    pass
+            canvas = _flatten_to_rgb(image)
             canvas.thumbnail((max_side, max_side), Image.LANCZOS)
             buffer = BytesIO()
             canvas.save(buffer, format="JPEG", quality=88, optimize=True)
-            return {
-                "mime": "image/jpeg",
-                "image": base64.b64encode(buffer.getvalue()).decode("ascii"),
-            }
+            return buffer.getvalue(), "image/jpeg"
     except Exception:
         return None
 
@@ -327,6 +376,34 @@ class ThumbCache:
         return len(self._items)
 
 
+class PreviewCache:
+    """按 (rel_path, mtime) 缓存预览字节与 MIME；满了淘汰最旧的一批。
+
+    预览比缩略图大一个量级，所以条数少得多。MIME 和数据存成一条，
+    不会再出现「数据被淘汰了、MIME 还留着」那种两张表对不上的状态。
+    """
+
+    def __init__(self, limit: int = PREVIEW_CACHE_ENTRIES) -> None:
+        self._limit = max(1, limit)
+        self._items: dict[tuple[str, int], tuple[bytes, str]] = {}
+
+    def get(self, rel_path: str, mtime_ns: int) -> tuple[bytes, str] | None:
+        return self._items.get((rel_path, mtime_ns))
+
+    def put(self, rel_path: str, mtime_ns: int, data: bytes, mime: str) -> None:
+        if len(self._items) >= self._limit:
+            drop = max(1, self._limit // 4)
+            for key in list(self._items)[:drop]:
+                del self._items[key]
+        self._items[(rel_path, mtime_ns)] = (data, mime)
+
+    def clear(self) -> None:
+        self._items.clear()
+
+    def size(self) -> int:
+        return len(self._items)
+
+
 __all__ = [
     "ALLOWED_STATES",
     "ALLOWED_SCOPES",
@@ -335,6 +412,7 @@ __all__ = [
     "PAGE_SIZE_MAX",
     "GENERIC_FILTER",
     "PageArgs",
+    "PreviewCache",
     "ThumbCache",
     "MAX_CAPTION",
     "MAX_TERM_COUNT",
@@ -343,9 +421,11 @@ __all__ = [
     "filter_memos",
     "keyword_hit",
     "PREVIEW_MAX_SIDE",
+    "_flatten_to_rgb",
+    "PREVIEW_SOFT_PIXELS",
     "normalize_upload_name",
-    "preview_payload",
     "parse_page_args",
+    "persona_params",
     "serialize_memo",
     "split_terms",
     "thumb_bytes",

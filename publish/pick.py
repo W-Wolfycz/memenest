@@ -113,7 +113,13 @@ def scope_allows(memo: Memo, umo: str | None) -> bool:
 
 
 def persona_allows(memo: Memo, persona_id: str | None) -> bool:
-    """人格归属：显式通用任何人格都能用；绑了人格的命中其一即可；全空则谁都不用。"""
+    """人格归属：禁用名单优先于可用名单。
+
+    判定顺序：命中禁用 → 谁都不给；显式通用（*）→ 任何人格都能用；
+    绑了人格 → 命中其一即可；可用名单全空 → 谁都不用。
+    """
+    if persona_id and persona_id in memo.blocked_persona_ids:
+        return False
     if GENERIC_PERSONA in memo.persona_ids:
         return True
     if not memo.persona_ids:

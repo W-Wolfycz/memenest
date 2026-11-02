@@ -1,4 +1,4 @@
-"""入库流水线：队列 + worker + 状态机（见 SPEC 第 5 章）。
+"""入库流水线：队列 + worker + 状态机。
 
 不变量守卫：
 - I-1：每条媒体只调用一次视觉模型（analyze_detailed 内部不重试）。
@@ -180,7 +180,7 @@ class IngestPipeline:
                 result.dropped += 1
                 self.counters.dropped_full += 1
                 self._log.debug(
-                    "memenest: 队列已满，丢弃新任务 reason=%s platform=%s",
+                    "[MemeNest] 队列已满，丢弃新任务 reason=%s platform=%s",
                     ref.reason,
                     ref.platform,
                 )
@@ -205,7 +205,7 @@ class IngestPipeline:
             except Exception as exc:  # 单条失败不得掀翻 worker
                 self.counters.failed += 1
                 self._log.error(
-                    "memenest: worker=%s 处理异常 type=%s", index, type(exc).__name__
+                    "[MemeNest] worker=%s 处理异常 type=%s", index, type(exc).__name__
                 )
             finally:
                 queue.task_done()
@@ -233,7 +233,7 @@ class IngestPipeline:
         if not fetched.ok or fetched.media is None:
             self.counters.rejected += 1
             self._log.debug(
-                "memenest: 抓取失败 reason=%s platform=%s",
+                "[MemeNest] 抓取失败 reason=%s platform=%s",
                 fetched.reason,
                 ref.platform,
             )
@@ -252,7 +252,7 @@ class IngestPipeline:
             if verdict.duplicate:
                 self.counters.duplicate += 1
                 self._log.debug(
-                    "memenest: 去重命中 reason=%s existing=%s",
+                    "[MemeNest] 去重命中 reason=%s existing=%s",
                     verdict.reason,
                     verdict.existing_id,
                 )
@@ -294,7 +294,7 @@ class IngestPipeline:
             raise
         except Exception as exc:  # 与 worker 一致：单条失败不能把请求打成 500
             self.counters.failed += 1
-            self._log.error("memenest: 单条处理异常 type=%s", type(exc).__name__)
+            self._log.error("[MemeNest] 单条处理异常 type=%s", type(exc).__name__)
             outcome = "failed"
         return {"outcome": outcome}
 
@@ -304,7 +304,7 @@ class IngestPipeline:
         call = self._llm_call()
         if call is None:
             # F2.5：分类能力不可用时收集照常，但只能进审核池并落在兜底类。
-            self._log.debug("memenest: 视觉模型不可用，按审核池裸条目入库")
+            self._log.debug("[MemeNest] 视觉模型不可用，按审核池裸条目入库")
             return Analysis(label=FALLBACK_LABEL), False
         outcome = await analyze_detailed(
             path,
@@ -314,7 +314,7 @@ class IngestPipeline:
         )
         if outcome.analysis is None:
             # 一次调用不重试：失败就是这张图没入库，让用户能在日志里看到原因
-            self._log.info("memenest: 分类失败 reason=%s（不入库）", outcome.reason)
+            self._log.info("[MemeNest] 分类失败 reason=%s（不入库）", outcome.reason)
             return None, True
         return outcome.analysis, True
 
@@ -334,13 +334,13 @@ class IngestPipeline:
         state = STATE_INBOX if (settings.review_enabled or not used_model) else STATE_READY
         target, rel_path = self._target_path(now, content_hash, ext, state)
         if not safe_rel_path(rel_path):
-            self._log.error("memenest: 目标路径非法，放弃入库")
+            self._log.error("[MemeNest] 目标路径非法，放弃入库")
             return "rejected"
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(tmp_path, target)
         except OSError as exc:
-            self._log.error("memenest: 落盘失败 type=%s", type(exc).__name__)
+            self._log.error("[MemeNest] 落盘失败 type=%s", type(exc).__name__)
             return "rejected"
 
         scope = ctx.scope if ctx.scope in (SCOPE_ANY, SCOPE_ORIGIN) else SCOPE_ANY
@@ -368,7 +368,7 @@ class IngestPipeline:
                     return "duplicate"
                 memo_id = await asyncio.to_thread(self.store.add, draft)
         except StoreError as exc:
-            self._log.error("memenest: 写库失败 type=%s", type(exc).__name__)
+            self._log.error("[MemeNest] 写库失败 type=%s", type(exc).__name__)
             _unlink(target)
             return "failed"
         if memo_id is None:
@@ -378,7 +378,7 @@ class IngestPipeline:
             return "duplicate"
         self.counters.stored += 1
         self._log.info(
-            "memenest: 入库 id=%s label=%s state=%s", memo_id, analysis.label, state
+            "[MemeNest] 入库 id=%s label=%s state=%s", memo_id, analysis.label, state
         )
         await self._index_vector(memo_id, analysis)
         return "stored"
@@ -416,7 +416,7 @@ class IngestPipeline:
                 self.store.save_embeddings, rows, int(self._clock())
             )
         except Exception as exc:  # 索引失败不进错误日志正文
-            self._log.warning("memenest: 向量入库失败 type=%s", type(exc).__name__)
+            self._log.warning("[MemeNest] 向量入库失败 type=%s", type(exc).__name__)
 
     def _target_path(
         self, now: int, content_hash: str, ext: str, state: str
@@ -441,16 +441,16 @@ class IngestPipeline:
         if shortfall > 0:
             # 收藏与人工导入永不淘汰，库可能停在超限状态。
             self._log.warning(
-                "memenest: 容量超限 %s 条无法淘汰（收藏/导入受保护）", shortfall
+                "[MemeNest] 容量超限 %s 条无法淘汰（收藏/导入受保护）", shortfall
             )
         for rel_path in removed:
             absolute = self.data_dir / rel_path
             try:
                 absolute.unlink(missing_ok=True)
             except OSError:
-                self._log.warning("memenest: 淘汰文件删除失败 rel=%s", rel_path)
+                self._log.warning("[MemeNest] 淘汰文件删除失败 rel=%s", rel_path)
         if removed:
-            self._log.info("memenest: 容量淘汰 count=%s", len(removed))
+            self._log.info("[MemeNest] 容量淘汰 count=%s", len(removed))
         return len(removed)
 
 

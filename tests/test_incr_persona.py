@@ -105,3 +105,54 @@ async def test_manual_send_rejects_foreign_persona(tmp_path):
     finally:
         await dispatcher.shutdown()
         store.close()
+
+
+def test_blocked_persona_wins_over_generic(store):
+    """禁用优先于通用：可用名单写着 * 也挡得住这一个。
+
+    判定顺序写反（先看通用就返回 True）时，指令禁用的表情照样会被发出来，
+    而日志里一切正常——只能靠「这张图又冒出来了」发现。
+    """
+    generic_id = store.add(_draft("inbox/generic.png"))
+    bound_id = store.add(_draft("inbox/bound.png", ("p1",)))
+    store.add_persona_block(generic_id, "p1")
+
+    for_p1 = {memo.id for memo in store.candidates(CandidateQuery(persona_id="p1"))}
+    assert generic_id not in for_p1, "被禁用的人格不该拿到这张"
+    assert bound_id in for_p1
+
+    # 只禁了一个人格：其他人格仍然能拿到通用那张
+    for_p2 = {memo.id for memo in store.candidates(CandidateQuery(persona_id="p2"))}
+    assert generic_id in for_p2
+    assert bound_id not in for_p2
+
+
+def test_persona_blocks_replace_and_clear(store):
+    """整体替换语义：重新保存要把旧条目删掉，传空要把禁用清干净。"""
+    memo_id = store.add(_draft("inbox/generic.png"))
+    store.set_persona_blocks(memo_id, ["p1", "p2"])
+    memo = store.get(memo_id)
+    assert memo is not None and set(memo.blocked_persona_ids) == {"p1", "p2"}
+
+    store.set_persona_blocks(memo_id, ["p2"])
+    memo = store.get(memo_id)
+    assert memo is not None and set(memo.blocked_persona_ids) == {"p2"}
+
+    store.set_persona_blocks(memo_id, [])
+    memo = store.get(memo_id)
+    assert memo is not None and memo.blocked_persona_ids == ()
+    assert persona_allows(memo, "p1") is True
+
+
+def test_reblock_same_persona_is_idempotent(store):
+    """指令可能被连点两次：重复禁同一个人格不该报错，也不该写出两行。"""
+    memo_id = store.add(_draft("inbox/generic.png"))
+    assert store.add_persona_block(memo_id, "p1") is True
+    assert store.add_persona_block(memo_id, "p1") is True
+    memo = store.get(memo_id)
+    assert memo is not None and memo.blocked_persona_ids == ("p1",)
+    assert persona_allows(memo, "p1") is False
+    # 取消之后恢复可用
+    assert store.remove_persona_block(memo_id, "p1") is True
+    memo = store.get(memo_id)
+    assert memo is not None and persona_allows(memo, "p1") is True

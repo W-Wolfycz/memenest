@@ -14,7 +14,9 @@ from typing import Any
 
 from ..domain import Reason
 
-DEFAULT_COMMAND_MARKERS: tuple[str, ...] = ("/", "!", "#", "！", "／", ".", "。")
+DEFAULT_COMMAND_MARKERS: tuple[str, ...] = ("/", "!", "#", "！", "／")
+"""回复文本的兜底前缀。句号不在里面：中文回复以「。」开头很常见，
+拿它当命令标记会把正常回复当成指令输出，静默跳过一次配图。"""
 QUESTION_MARKS = ("?", "？")
 _STRIP_FOR_LENGTH = re.compile(r"[\s\W_]+", re.UNICODE)
 _PLAIN_TYPE = "Plain"
@@ -44,6 +46,30 @@ class GateDecision:
 
 
 _ALLOWED = GateDecision(True, Reason.OK)
+
+_MODEL_RESULT_KINDS = frozenset({"LLM_RESULT", "AGENT_RUNNER_ERROR", "STREAMING_FINISH"})
+"""宿主 `ResultContentType` 里属于「模型在说话」的那几种；其余（GENERAL_RESULT）
+是命令回复或其他插件主动发的文本。按名字比对，免得为读一个枚举去 import 宿主 core。"""
+
+
+def result_is_model_reply(result: Any) -> bool:
+    """这条结果是不是模型自己生成的回复（含流式结束）。
+
+    命令回复、别的插件主动发的文本同样是「机器人说了句话」，但那是指令输出，
+    补一张表情只会显得在管理操作里乱插话。类型是准的，文本前缀只能兜底。
+    """
+    if result is None:
+        # on_llm_response 阶段结果还没设上，而这条文本本来就来自模型
+        return True
+    checker = getattr(result, "is_model_result", None)
+    if callable(checker):
+        try:
+            if checker():
+                return True
+        except Exception:
+            pass
+    kind = getattr(getattr(result, "result_content_type", None), "name", "")
+    return kind in _MODEL_RESULT_KINDS
 
 
 def session_key(umo: str | None) -> str | None:
@@ -150,5 +176,6 @@ __all__ = [
     "question_count",
     "reply_contains_image",
     "reply_text",
+    "result_is_model_reply",
     "visible_length",
 ]

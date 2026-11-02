@@ -6,10 +6,11 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 from . import commands_core as core
-from .ingest.collect import quoted_image_sources
+from .ingest.collect import image_sources
 
 class CommandRunner:
     def __init__(self, plugin: Any) -> None:
@@ -76,13 +77,43 @@ class CommandRunner:
         return "收集已关闭（已排队的任务会跑完）"
 
     async def _do_grab(self, event: Any, parsed: core.ParsedCommand, umo: str) -> str:
-        sources = quoted_image_sources(event)
+        sources = image_sources(event)
         if not sources:
             return "要引用一条带图片的消息才能收"
         queued, dropped = await self.plugin.grab_quoted(sources, umo)
         if not queued:
             return "没收到，可能是队列满了，稍后再试"
         return f"已收录 {queued} 张" + (f"（{dropped} 张因队列已满被丢弃）" if dropped else "")
+
+    async def _do_mute(self, event: Any, parsed: core.ParsedCommand, umo: str) -> str:
+        return await self._toggle_persona_block(event, umo, enabled=True)
+
+    async def _do_unmute(self, event: Any, parsed: core.ParsedCommand, umo: str) -> str:
+        return await self._toggle_persona_block(event, umo, enabled=False)
+
+    async def _toggle_persona_block(self, event: Any, umo: str, *, enabled: bool) -> str:
+        """对「这张表情 + 当前人格」加/取消禁用。
+
+        只是加一条黑名单，不改可用名单：原本通用的表情禁用一个人格后，
+        剩下的人格（包括以后新加的）仍然可用。
+        """
+        sources = image_sources(event)
+        if not sources:
+            return "把表情和这条指令一起发，或者引用一条带表情的消息"
+        outcome = await self.plugin.mute_for_persona(sources, umo, enabled=enabled)
+        code = outcome.get("code")
+        verb = "禁用" if enabled else "恢复"
+        if code == "no_persona":
+            return "这个会话没解析到人格，没法按人格禁用"
+        if code == "not_found":
+            return "库里没有这张表情——先让它被收集进来，再引用它发一次"
+        if code == "fetch_failed":
+            return "没取到这张图（链接可能过期或格式不支持），换一张再试"
+        if not outcome.get("ok"):
+            return f"{verb}失败（{code}）"
+        if enabled:
+            return f"已对当前人格禁用 #{outcome['memo_id']}，其他人格不受影响"
+        return f"已恢复 #{outcome['memo_id']} 在当前人格下的可用"
 
 
 def _is_admin(event: Any) -> bool:

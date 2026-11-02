@@ -47,6 +47,12 @@ class PanelApi:
     def __init__(self, plugin: Any) -> None:
         self.plugin = plugin
         self._thumbs = core.ThumbCache()
+        # 预览图比缩略图大得多，缓存条数少一些；同样按 (rel_path, mtime) 失效。
+        # 数据和 MIME 存在同一条里，不会出现两边对不上的状态。
+        self._previews = core.PreviewCache()
+        # 解码是 CPU 密集的：快速连点十几张时若全部并发，谁也拿不到完整时间片，
+        # 表现成「越点越卡」。串成 2 路并发，排队反而更快。
+        self._preview_slots = asyncio.Semaphore(2)
 
     # -- 注册 -------------------------------------------------------------
 
@@ -99,7 +105,8 @@ class PanelApi:
         # 配置里存在但库里还没用过的人格也要列出来，数量记 0
         for persona_id in await self._available_personas():
             personas.setdefault(persona_id, 0)
-        personas.pop(GENERIC_PERSONA, None)
+        # "通用" 在 store 里归一成空键，面板按「全部 / （通用）」两个哨兵自己筛
+        personas.pop("", None)
         personas = dict(sorted(personas.items(), key=lambda item: (-item[1], item[0])))
         vector: dict[str, Any] = {}
         getter = getattr(self.plugin, "vector_state", None)
@@ -185,6 +192,7 @@ class PanelApi:
                     page=page_no,
                     size=core.PAGE_SIZE_MAX,
                 ),
+                with_total=False,
             )
             pool.extend(batch)
             if len(batch) < core.PAGE_SIZE_MAX:
@@ -319,10 +327,9 @@ class PanelApi:
         if not rows:
             return _fail("没有需要处理的条目")
 
-        # 目录跟着状态走：待审核在 inbox/，其余在 blobs/<月>/。
-        # 批量转换时这些路径几乎是同一批文件，逐条 get + set_state 是纯浪费。
+        # 目录跟着状态走：三个动作的目标状态都在 blobs/ 下（inbox 只对应「待审核」，
+        # 批量动作永远不会把人送回去），所以只需把还躺在 inbox/ 的文件挪出来。
         data_dir = Path(self.plugin.data_dir)
-        want_inbox = target == STATE_INBOX
         month = time.strftime("%Y%m")
         moves: dict[int, str] = {}
         failed: list[dict[str, Any]] = []
@@ -332,13 +339,9 @@ class PanelApi:
             if source_path is None:
                 failed.append({"id": memo_id, "reason": "记录路径非法"})
                 continue
-            if want_inbox == rel_path.startswith("inbox/"):
+            if not rel_path.startswith("inbox/"):
                 continue  # 目录已经对，只改状态
-            new_rel = (
-                f"inbox/{source_path.name}"
-                if want_inbox
-                else f"blobs/{month}/{source_path.name}"
-            )
+            new_rel = f"blobs/{month}/{source_path.name}"
             target_path = resolve_within(data_dir, new_rel)
             if target_path is None:
                 failed.append({"id": memo_id, "reason": "目标路径非法"})
@@ -477,10 +480,31 @@ class PanelApi:
         source = resolve_within(Path(self.plugin.data_dir), memo.rel_path)
         if source is None:
             return _fail("记录路径非法")
-        payload = await asyncio.to_thread(core.preview_payload, source)
-        if payload is None:
+        try:
+            mtime = source.stat().st_mtime_ns
+        except OSError:
             return _fail("图片读取失败")
-        return json_response({"ok": True, **payload})
+
+        cached = self._previews.get(memo.rel_path, mtime)
+        if cached is None:
+            async with self._preview_slots:
+                # 排队期间别人可能已经算完同一条，进锁后再看一次
+                cached = self._previews.get(memo.rel_path, mtime)
+                if cached is None:
+                    got = await asyncio.to_thread(core.preview_bytes, source)
+                    if got is None:
+                        return _fail("图片读取失败")
+                    data, mime = got
+                    self._previews.put(memo.rel_path, mtime, data, mime)
+                    cached = (data, mime)
+        data, mime = cached
+        return json_response(
+            {
+                "ok": True,
+                "mime": mime,
+                "image": base64.b64encode(data).decode("ascii"),
+            }
+        )
 
     async def handle_delete(self) -> Any:
         body = await request.json(default={})
@@ -525,26 +549,31 @@ class PanelApi:
         return await self._batch(ids, action)
 
     async def handle_bind(self) -> Any:
+        """POST {ids, persona_ids?, block_persona_ids?} → 改可用名单 / 禁用人格。
+
+        两个字段各自独立：传了才改，都不传等于没操作。
+        """
         body = await request.json(default={})
         ids = core.clamp_ids(body.get("ids") or body.get("id"))
         if not ids:
             return _fail("缺少 id")
-        raw = body.get("persona_ids")
-        if raw is None:
-            raw = body.get("persona_id")
-        if isinstance(raw, (list, tuple)):
-            persona_ids = [str(item).strip() for item in raw if str(item).strip()]
-        else:
-            text = str(raw or "").strip()
-            persona_ids = (
-                [] if text.lower() in ("none", "clear", "", "-")
-                else [part.strip() for part in text.replace("，", ",").split(",") if part.strip()]
-            )
+        allow, block = core.persona_params(body)
+        if allow is None and block is None:
+            return _fail("没有要改的人格设置")
 
         async def action(memo_id: int) -> tuple[bool, str]:
-            ok = await asyncio.to_thread(
-                self.plugin.store.set_personas, memo_id, persona_ids
-            )
+            ok = True
+            if allow is not None:
+                ok = await asyncio.to_thread(
+                    self.plugin.store.set_personas, memo_id, allow
+                )
+            if block is not None:
+                ok = (
+                    await asyncio.to_thread(
+                        self.plugin.store.set_persona_blocks, memo_id, block
+                    )
+                    and ok
+                )
             return ok, "not_found"
 
         return await self._batch(ids, action)
@@ -650,8 +679,11 @@ class PanelApi:
         imports_dir.mkdir(parents=True, exist_ok=True)
         target = imports_dir / f"{uuid.uuid4().hex}{ext}"
         try:
-            await upload.save(target)
+            # 交给宿主边写边卡上限：content_length 缺失时（分块上传）也能在超限的
+            # 那一刻停下并删掉半截文件，不会先把磁盘写满再回头检查。
+            await upload.save(target, max_bytes=MAX_IMPORT_BYTES)
         except Exception as exc:
+            target.unlink(missing_ok=True)
             return _fail(f"保存失败：{type(exc).__name__}")
         try:
             if target.stat().st_size > MAX_IMPORT_BYTES:

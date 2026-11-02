@@ -298,6 +298,7 @@ function buildCard(item) {
   const labels = [item.label_name].concat((item.labels || []).map((entry) => entry.name));
 
   const personaIds = item.persona_ids || [];
+  const blockedPersonas = item.blocked_personas || [];
   const persona = item.persona_generic
     ? '<span class="badge persona">通用</span>'
     : personaIds.length
@@ -309,6 +310,11 @@ function buildCard(item) {
           ? `<span class="badge persona">+${personaIds.length - 2}</span>`
           : "")
       : '<span class="badge persona none">谁都不用</span>';
+  const blockedBadge = blockedPersonas.length
+    ? `<span class="badge persona block" title="这些人格不发：${escapeHtml(
+        blockedPersonas.join("、"),
+      )}">禁 ${blockedPersonas.length}</span>`
+    : "";
   const caption = item.caption || "（无描述）";
   const picText = (item.text_in_image || "").trim();
 
@@ -336,6 +342,7 @@ function buildCard(item) {
         <span class="badge">${escapeHtml(labels.join(" · "))}</span>
         ${item.is_fav ? '<span class="badge is-fav">收藏</span>' : ""}
         ${persona}
+        ${blockedBadge}
       </div>
       <p class="caption">${escapeHtml(caption)}</p>
       ${picText ? `<p class="pic-text" title="图上文字">图上 ${escapeHtml(picText)}</p>` : ""}
@@ -665,52 +672,106 @@ async function saveEdit() {
   await Promise.all([loadStats(), loadList()]);
 }
 
+/** 弹层里的人格草稿：一个列表三种状态，避免可用/禁用两份同样的长列表。 */
+let personaDraft = { generic: false, allow: new Set(), block: new Set() };
+
 function openPersona(id) {
   const item = state.items.find((entry) => entry.id === id);
   if (!item) return;
-  const generic = Boolean(item.persona_generic);
-  const current = new Set(item.persona_ids || []);
-  const genericChip =
-    `<button type="button" class="chip-toggle generic${generic ? " on" : ""}" ` +
-    'data-persona="*" title="任何人格都能用">通用</button>';
+  personaDraft = {
+    generic: Boolean(item.persona_generic),
+    allow: new Set(item.persona_ids || []),
+    block: new Set(item.blocked_personas || []),
+  };
   const chips = state.personas.length
     ? state.personas
         .map(
           (key) =>
-            `<button type="button" class="chip-toggle${current.has(key) ? " on" : ""}" ` +
-            `data-persona="${escapeHtml(key)}">${escapeHtml(key)}</button>`,
+            `<button type="button" class="chip-toggle tri-chip" ` +
+            `data-tri-persona="${escapeHtml(key)}">${escapeHtml(key)}</button>`,
         )
         .join("")
     : '<span class="hint">宿主里还没有配置人格</span>';
   openModal(
     `绑定人格 #${id}`,
-    `<div class="persona-generic">${genericChip}</div>
-     <div class="chip-select persona-chips">${chips}</div>
+    `<div class="persona-tools">
+       <button type="button" class="chip-toggle generic" data-persona-generic="1"
+         title="所有人格都能用">通用</button>
+       <input id="persona-search" type="search" placeholder="搜索人格…" aria-label="搜索人格" />
+     </div>
+     <p class="form-hint">
+       点一下 = 可用，点两下 = 禁用，点三下 = 不参与。禁用优先于可用（通用也挡得住）。
+     </p>
+     <div class="chip-select persona-grid">${chips}</div>
+     <p class="persona-summary" id="persona-summary"></p>
      <div class="modal-actions">
        <button type="button" class="btn ghost" data-close="1">取消</button>
        <button type="button" class="btn primary" data-modal="save-persona">保存</button>
      </div>`,
   );
   $("modal-panel").dataset.memoId = String(id);
+  syncPersonaDraft();
 }
 
-function pickedPersonas() {
-  return Array.from(modalNode(".persona-chips").querySelectorAll(".chip-toggle.on")).map(
-    (chip) => chip.dataset.persona,
-  );
+function syncPersonaDraft() {
+  const panel = $("modal-panel");
+  panel
+    .querySelector("[data-persona-generic]")
+    ?.classList.toggle("on", personaDraft.generic);
+  for (const chip of panel.querySelectorAll(".tri-chip")) {
+    const key = chip.dataset.triPersona;
+    const isAllow = personaDraft.allow.has(key);
+    const isBlock = personaDraft.block.has(key);
+    chip.classList.toggle("allow", isAllow);
+    chip.classList.toggle("block", isBlock);
+    chip.setAttribute("aria-pressed", String(isAllow || isBlock));
+  }
+  const summary = panel.querySelector("#persona-summary");
+  if (summary) summary.textContent = personaSummaryText();
 }
 
-async function bindPersona(personaIds) {
+function personaSummaryText() {
+  const parts = [];
+  if (personaDraft.generic) parts.push("可用：通用（所有人格）");
+  else if (personaDraft.allow.size) parts.push(`可用：${[...personaDraft.allow].join("、")}`);
+  else parts.push("可用：空（谁都不发）");
+  if (personaDraft.block.size) parts.push(`禁用：${[...personaDraft.block].join("、")}`);
+  return parts.join("　·　");
+}
+
+function toggleTriPersona(key) {
+  if (!key) return;
+  if (personaDraft.allow.has(key)) {
+    personaDraft.allow.delete(key);
+    personaDraft.block.add(key);
+  } else if (personaDraft.block.has(key)) {
+    personaDraft.block.delete(key);
+  } else {
+    // 从「不参与」点到「可用」。通用表示「所有人可用」，此时再挑具体人格，
+    // 数据上会被通用盖掉、保存后看不出任何变化——所以先关掉通用，让它变成「只给这些」。
+    personaDraft.generic = false;
+    personaDraft.allow.add(key);
+  }
+  syncPersonaDraft();
+}
+
+async function bindPersona() {
   const id = Number($("modal-panel").dataset.memoId);
-  const res = await guard(() => api.post("bind", { ids: [id], persona_ids: personaIds }), "绑定");
+  // 通用就是整份可用名单，别再叠具体人格；禁用名单照存不误（它优先）
+  const allow = personaDraft.generic
+    ? ["*"]
+    : [...personaDraft.allow].filter((key) => key !== "*");
+  const block = [...personaDraft.block];
+  const res = await guard(
+    () => api.post("bind", { ids: [id], persona_ids: allow, block_persona_ids: block }),
+    "绑定",
+  );
   if (!res || !res.ok) {
     toast((res && res.message) || "绑定失败", true);
     return;
   }
   closeModal();
-  if (personaIds.includes("*")) toast("已改为通用");
-  else if (personaIds.length) toast(`已绑定 ${personaIds.join("、")}`);
-  else toast("已设为谁都不用");
+  toast(personaSummaryText());
   await Promise.all([loadStats(), loadList()]);
 }
 
@@ -1091,26 +1152,22 @@ function bindEvents() {
       return;
     }
 
+    const genericChip = event.target.closest("[data-persona-generic]");
+    if (genericChip) {
+      personaDraft.generic = !personaDraft.generic;
+      if (personaDraft.generic) personaDraft.allow.clear();
+      syncPersonaDraft();
+      return;
+    }
+
+    const triChip = event.target.closest(".tri-chip");
+    if (triChip) {
+      toggleTriPersona(triChip.dataset.triPersona);
+      return;
+    }
+
     const chip = event.target.closest(".chip-toggle");
     if (chip) {
-      if (chip.dataset.persona !== undefined) {
-        const panel = $("modal-panel");
-        const isGeneric = chip.dataset.persona === "*";
-        if (chip.classList.contains("on")) {
-          chip.classList.remove("on");
-        } else if (isGeneric) {
-          // 选通用：清掉所有具体人格
-          panel
-            .querySelectorAll(".persona-chips .chip-toggle.on")
-            .forEach((node) => node.classList.remove("on"));
-          chip.classList.add("on");
-        } else {
-          // 选具体人格：通用让位
-          panel.querySelector('.chip-toggle[data-persona="*"]')?.classList.remove("on");
-          chip.classList.add("on");
-        }
-        return;
-      }
       if (chip.classList.contains("main")) return;
       const picked = chip.parentElement.querySelectorAll(".chip-toggle.on");
       if (!chip.classList.contains("on") && picked.length >= MAX_EXTRA_LABELS) {
@@ -1125,7 +1182,16 @@ function bindEvents() {
     if (action.dataset.modal === "save-edit") {
       await saveEdit();
     } else if (action.dataset.modal === "save-persona") {
-      await bindPersona(pickedPersonas());
+      await bindPersona();
+    }
+  });
+
+  $("modal").addEventListener("input", (event) => {
+    if (event.target.id !== "persona-search") return;
+    const keyword = event.target.value.trim().toLowerCase();
+    for (const chip of $("modal-panel").querySelectorAll(".tri-chip")) {
+      const name = (chip.dataset.triPersona || "").toLowerCase();
+      chip.hidden = Boolean(keyword) && !name.includes(keyword);
     }
   });
 

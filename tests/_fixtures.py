@@ -113,6 +113,7 @@ def make_memo(
     scenes: tuple[str, ...] = ("我裂开了",),
     labels: tuple[str, ...] = (),
     persona_ids: tuple[str, ...] = (GENERIC_PERSONA,),
+    blocked_persona_ids: tuple[str, ...] = (),
     use_count: int = 0,
     is_fav: bool = False,
     state: str = STATE_READY,
@@ -137,4 +138,5 @@ def make_memo(
         scenes=scenes,
         labels=labels,
         persona_ids=persona_ids,
+        blocked_persona_ids=blocked_persona_ids,
     )
