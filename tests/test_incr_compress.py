@@ -20,17 +20,6 @@ def _big_static(path, size: int = 1600) -> None:
     image.save(path, format="PNG")
 
 
-def _animated_gif(path, frames: int = 20) -> None:
-    images = []
-    spacing = 120
-    for index in range(frames):
-        frame = Image.new("RGB", (400, 400), (255, 255, 255))
-        box = Image.new("RGB", (spacing, spacing), (index * 10 % 256, 80, 160))
-        frame.paste(box, (index * 8 % 200, spacing))
-        images.append(frame)
-    images[0].save(
-        path, save_all=True, append_images=images[1:], duration=80, loop=0, format="GIF"
-    )
 def test_clear_cache_removes_products(tmp_path):
     """清缓存要真的清空产物：残留会随发送次数线性增长，只有磁盘发现得了。"""
     source = tmp_path / "big.png"

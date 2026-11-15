@@ -20,13 +20,6 @@ class FakeImage:
         self.path = path
 
 
-class FakePlain:
-    type = "Plain"
-
-    def __init__(self, text: str) -> None:
-        self.text = text
-
-
 @dataclass
 class FakeMessageObj:
     message: list[Any] = field(default_factory=list)

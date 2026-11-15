@@ -12,12 +12,14 @@ import asyncio
 import base64
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.web import PluginUploadFile, json_response, request
 
+from . import backup
 from . import panel_core as core
 from .config import PLUGIN_NAME
 from .domain import (
@@ -34,6 +36,8 @@ from .domain import (
     PageQuery,
 )
 from .ingest import security
+from .ingest.fetch import fetch_json
+from . import backup
 from .ingest.pipeline import IngestContext
 from .paths import resolve_within
 
@@ -53,6 +57,8 @@ class PanelApi:
         # 解码是 CPU 密集的：快速连点十几张时若全部并发，谁也拿不到完整时间片，
         # 表现成「越点越卡」。串成 2 路并发，排队反而更快。
         self._preview_slots = asyncio.Semaphore(2)
+        # 备份打包占位：同一时刻只允许一个打包任务（并发写同一个 zip 会出坏包）
+        self._exporting = False
 
     # -- 注册 -------------------------------------------------------------
 
@@ -87,6 +93,19 @@ class PanelApi:
             ),
             ("unban", self.handle_unban, ["POST"], "MemeNest 解除拉黑"),
             ("import", self.handle_import, ["POST"], "MemeNest URL 导入"),
+            ("import/manifest", self.handle_import_manifest, ["POST"], "MemeNest 清单导入"),
+            ("search/preview", self.handle_search_preview, ["POST"], "MemeNest 检索预览"),
+            ("export", self.handle_export_create, ["POST"], "MemeNest 生成备份"),
+            ("export/list", self.handle_export_list, ["GET"], "MemeNest 备份列表"),
+            ("export/delete", self.handle_export_delete, ["POST"], "MemeNest 删除备份"),
+            ("overview", self.handle_overview, ["GET"], "MemeNest 大盘概览"),
+            ("reanalyze", self.handle_reanalyze, ["POST"], "MemeNest 重新识图"),
+            ("reanalyze/state", self.handle_reanalyze_state, ["GET"], "MemeNest 重识进度"),
+            ("integrity", self.handle_integrity, ["GET"], "MemeNest 完整性体检"),
+            ("integrity/vacuum", self.handle_integrity_vacuum, ["POST"], "MemeNest 整理数据库"),
+            ("integrity/orphans", self.handle_integrity_orphans, ["POST"], "MemeNest 清理孤儿文件"),
+            ("integrity/missing", self.handle_integrity_missing, ["POST"], "MemeNest 删除缺失记录"),
+            ("export/images", self.handle_export_images, ["POST"], "MemeNest 导出选中图片"),
             ("reindex", self.handle_reindex, ["POST"], "MemeNest 向量索引"),
             ("import/process", self.handle_import_process, ["POST"], "MemeNest 处理已上传文件"),
             ("import/file", self.handle_import_file, ["POST"], "MemeNest 文件导入"),
@@ -97,6 +116,231 @@ class PanelApi:
         return True
 
     # -- 读取 -------------------------------------------------------------
+
+    # -- 大盘 / 体检 / 重新识图 -------------------------------------------
+
+    async def handle_overview(self) -> Any:
+        """一次性返回大盘要的所有数据（库况、检索、发送、存储、健康告警）。"""
+        store = self.plugin.store
+        stats = await asyncio.to_thread(store.stats)
+        labels = {key: 0 for key in LABEL_KEYS}
+        for key, count in (await asyncio.to_thread(store.labels_in_use)).items():
+            labels[key] = count
+        origins = await asyncio.to_thread(store.origin_stats, 8)
+        undescribed = await asyncio.to_thread(store.count_without_description)
+        integrity = await self.plugin.integrity()
+        vision = self.plugin.vision_budget_state()
+        vector = await asyncio.to_thread(self.plugin.vector_state)
+        dispatcher = self.plugin.dispatcher
+        recent = dispatcher.recent_sends() if dispatcher is not None else []
+        rejected = dispatcher.reject_stats() if dispatcher is not None else {}
+        pipeline = self.plugin.pipeline
+        counters = self.plugin.counters()
+        library_cap = self.plugin.library_cap()
+        model_ok = self.plugin.model_available()
+
+        warnings: list[dict[str, str]] = []
+        if not model_ok:
+            warnings.append(
+                {
+                    "level": "error",
+                    "text": "没有可用的视觉模型：新收的图会以兜底类入库、没有描述",
+                }
+            )
+        budget_full = vision["limit"] > 0 and vision["used"] >= vision["limit"]
+        if budget_full:
+            warnings.append(
+                {
+                    "level": "warn",
+                    "text": f"今日识图预算已用完（{vision['used']}/{vision['limit']}），"
+                    "新收的图暂不打标，次日自动恢复",
+                }
+            )
+        no_model = int(counters.get("缺模型", 0))
+        if no_model:
+            warnings.append(
+                {
+                    "level": "warn",
+                    "text": f"有 {no_model} 条是在没有视觉模型时入库的，可点「重新识图」补描述",
+                }
+            )
+        if undescribed:
+            warnings.append(
+                {
+                    "level": "warn",
+                    "text": f"库里有 {undescribed} 条没有描述（检索不到，也看不出内容）",
+                }
+            )
+        if integrity["missing_count"]:
+            warnings.append(
+                {
+                    "level": "error",
+                    "text": f"{integrity['missing_count']} 条记录的文件已不在磁盘上，建议删除这些记录",
+                }
+            )
+        if integrity["orphan_count"]:
+            warnings.append(
+                {
+                    "level": "warn",
+                    "text": f"{integrity['orphan_count']} 个文件没有被任何记录引用（只占空间）",
+                }
+            )
+        if library_cap and stats.total >= int(library_cap * 0.9):
+            warnings.append(
+                {
+                    "level": "warn",
+                    "text": f"库容量接近上限（{stats.total}/{library_cap}），"
+                    "到顶后会按「用得最少」淘汰",
+                }
+            )
+        if vector.get("enabled") and vector.get("expected", 0) > vector.get("covered", 0):
+            warnings.append(
+                {
+                    "level": "info",
+                    "text": f"向量索引未补齐（{vector.get('covered', 0)}/{vector.get('expected', 0)}），"
+                    "可在表情管理页点「补齐」",
+                }
+            )
+
+        return json_response(
+            {
+                "ok": True,
+                "library": {
+                    "total": stats.total,
+                    "ready": stats.ready,
+                    "inbox": stats.inbox,
+                    "disabled": stats.disabled,
+                    "blocked": stats.blocked,
+                    "undescribed": undescribed,
+                    "cap": library_cap,
+                    "labels": labels,
+                    "origins": origins,
+                },
+                "vector": vector,
+                "vision": {
+                    "available": model_ok,
+                    "used": vision["used"],
+                    "limit": vision["limit"],
+                    "no_model": no_model,
+                },
+                "send": {
+                    "attempts": dispatcher.stats.attempts if dispatcher is not None else 0,
+                    "sent": dispatcher.stats.sent if dispatcher is not None else 0,
+                    "failed": dispatcher.stats.failed if dispatcher is not None else 0,
+                    "cancelled": dispatcher.stats.cancelled if dispatcher is not None else 0,
+                    "rejected": rejected,
+                    "recent": recent[:5],
+                },
+                "storage": {
+                    "db": integrity["db"]["db"],
+                    "wal": integrity["db"]["wal"],
+                    "dirs": integrity["dirs"],
+                    "total_bytes": integrity["total_bytes"],
+                    "missing": integrity["missing_count"],
+                    "orphans": integrity["orphan_count"],
+                },
+                "queue_depth": self.plugin.queue_depth(),
+                "reanalyze": self.plugin.reanalyze_state(),
+                "counters": counters,
+                "warnings": warnings,
+            }
+        )
+
+    async def handle_integrity(self) -> Any:
+        report = await self.plugin.integrity()
+        return json_response({"ok": True, **report})
+
+    async def handle_integrity_vacuum(self) -> Any:
+        result = await self.plugin.integrity_vacuum()
+        logger.info(
+            "[MemeNest] 数据库整理完成 saved=%s bytes", result.get("saved")
+        )
+        return json_response({"ok": True, **result})
+
+    async def handle_integrity_orphans(self) -> Any:
+        """POST {paths?} → 删除孤儿文件；不传 paths 就按当前对账结果全删。"""
+        body = await request.json(default={})
+        raw = body.get("paths")
+        paths = [str(item) for item in raw] if isinstance(raw, list) else None
+        result = await self.plugin.integrity_drop_orphans(paths)
+        logger.info(
+            "[MemeNest] 清理孤儿文件 removed=%s failed=%s",
+            result.get("removed"),
+            result.get("failed"),
+        )
+        return json_response({"ok": True, **result})
+
+    async def handle_integrity_missing(self) -> Any:
+        """POST → 删掉「库里有记录、磁盘没有文件」的条目（不可逆，先重新对账）。"""
+        result = await self.plugin.integrity_drop_missing()
+        logger.info(
+            "[MemeNest] 删除缺失文件记录 removed=%s/%s",
+            result.get("removed"),
+            result.get("scanned"),
+        )
+        return json_response({"ok": True, **result})
+
+    async def handle_export_images(self) -> Any:
+        """POST {ids} → 把选中的图片打成一个 zip，直接回 base64 让页面下载。
+
+        不走「生成到 exports/ 再让用户去取」那条路：导出选中通常是几十张，
+        十几 MB 在面板里下载比让用户去服务器翻目录顺手得多。
+        """
+        body = await request.json(default={})
+        raw = body.get("ids")
+        ids = [int(item) for item in raw] if isinstance(raw, list) else []
+        if not ids:
+            return _fail("没有选中条目")
+        ids = ids[: core.MAX_BATCH_IDS]
+        paths = await asyncio.to_thread(self.plugin.store.rel_paths_for, ids)
+        if not paths:
+            return _fail("选中的条目已经不存在了")
+        try:
+            result = await asyncio.to_thread(
+                backup.build_selection_zip, self.plugin.data_dir, paths
+            )
+        except backup.SelectionTooLarge as exc:
+            return _fail(
+                f"选中的图片打包后有 {int(exc.args[0]) // (1024 * 1024)} MB，"
+                "超过单次导出上限，请分批导出"
+            )
+        name = backup.selection_name(datetime.now())
+        encoded = base64.b64encode(result["data"]).decode("ascii")
+        logger.info(
+            "[MemeNest] 导出选中图片 name=%s count=%s bytes=%s skipped=%s",
+            name,
+            result["included"],
+            len(result["data"]),
+            result["skipped"],
+        )
+        return json_response(
+            {
+                "ok": True,
+                "name": name,
+                "count": result["included"],
+                "skipped": result["skipped"],
+                "bytes": len(result["data"]),
+                "base64": encoded,
+            }
+        )
+
+    async def handle_reanalyze(self) -> Any:
+        body = await request.json(default={})
+        scope = str(body.get("scope") or "empty")
+        raw_ids = body.get("ids")
+        ids = [int(item) for item in raw_ids] if isinstance(raw_ids, list) else None
+        if scope not in ("empty", "ids"):
+            return _fail("scope 只能是 empty 或 ids")
+        if scope == "ids" and not ids:
+            return _fail("没有选中条目")
+        if not self.plugin.start_reanalyze(scope, ids):
+            return _fail("已经在重新识图了")
+        return json_response({"ok": True, "started": True, "scope": scope})
+
+    async def handle_reanalyze_state(self) -> Any:
+        params = await request.query()
+        scope = str(params.get("scope") or "empty")
+        return json_response({"ok": True, **self.plugin.reanalyze_state(scope)})
 
     async def handle_stats(self) -> Any:
         store = self.plugin.store
@@ -111,10 +355,17 @@ class PanelApi:
         vector: dict[str, Any] = {}
         getter = getattr(self.plugin, "vector_state", None)
         if getter is not None:
-            try:
-                vector = await asyncio.to_thread(getter)
-            except Exception:
-                vector = {}
+            # vector_state 自己已经处理了「查询失败」的降级，这里不再套一层 try：
+            # 真正的异常应该冒到面板上，而不是让向量卡片静默变空。
+            vector = await asyncio.to_thread(getter)
+        # 标签体检：21 类全量计数（主标签 + 附加标签），零值也要给出来——
+        # 哪些分类一直没被用到，比总量更能说明打标质量。
+        labels = {key: 0 for key in LABEL_KEYS}
+        for key, count in (await asyncio.to_thread(store.labels_in_use)).items():
+            labels[key] = count
+        # 来源统计 + 识图预算：面板「库况」与预算黄条的数据源
+        origins = await asyncio.to_thread(store.origin_stats, 10)
+        vision = self.plugin.vision_budget_state()
         return json_response(
             {
                 "vector": vector,
@@ -125,6 +376,10 @@ class PanelApi:
                 "disabled": stats.disabled,
                 "blocked": stats.blocked,
                 "by_label": stats.by_label,
+                "labels": labels,
+                "origins": origins,
+                "vision_budget": vision,
+                "manifest_limit": core.MANIFEST_MAX_ITEMS,
                 "personas": personas,
                 "counters": self.plugin.counters(),
                 "queue_depth": self.plugin.queue_depth(),
@@ -606,7 +861,78 @@ class PanelApi:
         logger.debug("[MemeNest] 面板批量操作 ok=%s failed=%s", len(succeeded), len(failed))
         return json_response({"ok": True, "succeeded": succeeded, "failed": failed})
 
-    # -- 导入 -------------------------------------------------------------
+    # -- 导入 / 导出 --------------------------------------------------------
+
+    async def handle_export_create(self) -> Any:
+        """POST → 生成一份完整备份（db 快照 + blobs/inbox），返回路径与列表。
+
+        打包期间占位：两个页面（或连点两下）同时进来会撞同一个文件名、
+        两个线程写同一个 zip，结果是坏包。
+        """
+        if self._exporting:
+            return _fail("正在打包，请稍候")
+        self._exporting = True
+        try:
+            path = await asyncio.to_thread(
+                backup.create_backup,
+                Path(self.plugin.data_dir),
+                self.plugin.store.db_path,
+            )
+        finally:
+            self._exporting = False
+        items = await asyncio.to_thread(
+            backup.list_exports, Path(self.plugin.data_dir)
+        )
+        return json_response(
+            {
+                "ok": True,
+                "name": path.name,
+                "size": path.stat().st_size,
+                "exports": items,
+                "directory": str(path.parent),
+                "keep": backup.EXPORT_KEEP,
+            }
+        )
+
+    async def handle_export_list(self) -> Any:
+        items = await asyncio.to_thread(
+            backup.list_exports, Path(self.plugin.data_dir)
+        )
+        directory = backup.exports_dir(Path(self.plugin.data_dir))
+        return json_response(
+            {
+                "ok": True,
+                "exports": items,
+                "directory": str(directory),
+                "keep": backup.EXPORT_KEEP,
+            }
+        )
+
+    async def handle_export_delete(self) -> Any:
+        body = await request.json(default={})
+        name = str(body.get("name") or "")
+        ok = await asyncio.to_thread(
+            backup.delete_export, Path(self.plugin.data_dir), name
+        )
+        if not ok:
+            return _fail("没有这个备份文件")
+        items = await asyncio.to_thread(
+            backup.list_exports, Path(self.plugin.data_dir)
+        )
+        return json_response(
+            {"ok": True, "exports": items, "keep": backup.EXPORT_KEEP}
+        )
+
+    async def handle_search_preview(self) -> Any:
+        """POST {text, context_text?} → 两条检索路各自的 top 候选（dry-run）。"""
+        body = await request.json(default={})
+        text = str(body.get("text") or "")
+        context_text = str(body.get("context_text") or "")
+        dispatcher = self.plugin.dispatcher
+        if dispatcher is None:
+            return _fail("发送器未初始化")
+        result = await dispatcher.preview(text, context_text)
+        return json_response({"ok": True, **result})
 
     async def handle_reindex(self) -> Any:
         """POST {full} → 后台补算向量。full=true 先清空再全量重算。"""
@@ -662,6 +988,63 @@ class PanelApi:
             bool(persona_id),
         )
         return json_response({"ok": True, **result})
+
+    async def handle_import_manifest(self) -> Any:
+        """POST {url, persona_id?, scope?, umo?} → 拉 JSON 清单并整批入队。
+
+        清单是图片 URL 数组，或 `{"items": [...]}`（项可为字符串或 `{"url": ...}`）。
+        只入队不等结果：进度看「队列/统计」，单条失败按失败计。
+        """
+        body = await request.json(default={})
+        url = str(body.get("url") or "").strip()
+        if not url:
+            return _fail("没有提供清单 url")
+        allowed, reason = security.check_url(url)
+        if not allowed:
+            return json_response({"ok": True, "outcome": "rejected", "reason": reason})
+        try:
+            scope, umo, persona_id = core.import_params(body)
+        except ValueError as exc:
+            return _fail(str(exc))
+
+        data, error = await fetch_json(url)
+        if error:
+            return _fail(f"清单读取失败（{error}）")
+        urls = core.manifest_urls(data)
+        if not urls:
+            return _fail("清单里没有可用的图片 URL")
+
+        refs = [
+            MediaRef(
+                source=item,
+                declared_ext="",
+                origin_kind=ORIGIN_IMPORT,
+                platform="panel",
+                reason="import_manifest",
+            )
+            for item in urls
+        ]
+        ctx = IngestContext(
+            umo=umo,
+            origin_kind=ORIGIN_IMPORT,
+            scope=scope,
+            persona_id=persona_id,
+        )
+        result = self.plugin.pipeline.submit(refs, ctx)
+        logger.info(
+            "[MemeNest] 清单导入 queued=%s dropped=%s total=%s",
+            result.queued,
+            result.dropped,
+            len(urls),
+        )
+        return json_response(
+            {
+                "ok": True,
+                "queued": result.queued,
+                "dropped": result.dropped,
+                "total": len(urls),
+            }
+        )
 
     async def handle_import_file(self) -> Any:
         """POST multipart（字段名 file）→ 只接收文件，识别交给 import/process。"""

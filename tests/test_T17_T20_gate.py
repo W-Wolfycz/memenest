@@ -1,44 +1,14 @@
-"""T-17 / T-18 / T-19 / T-20 / R-3 / R-4：闸顺序、意图门控与作用域。
+"""R-4：作用域门控。
 
-守的静默失效：闸顺序被调换后概率/候选把便宜的拒绝挡在后面（无谓查库）；
-作用域取不到会话标识时放行（越界发送）；命令回复也被补表情（打断指令交互）。
+守的静默失效：作用域取不到会话标识时放行——「只想在这个群用」的图会被发到所有会话，
+而发出去的图本身看不出是从哪来的。
 """
 
 from __future__ import annotations
 
 from memenest.domain import GENERIC_PERSONA, SCOPE_ANY, SCOPE_ORIGIN, Memo
-from memenest.publish.gate import GateInput
+from memenest.publish.gate import humanized_delay, visible_length
 from memenest.publish.pick import scope_allows
-
-
-class _Plain:
-    type = "Plain"
-
-    def __init__(self, text: str) -> None:
-        self.text = text
-
-
-class _Image:
-    type = "Image"
-
-    def __init__(self, file: str = "a.png") -> None:
-        self.file = file
-
-
-def _gate(**overrides) -> GateInput:
-    base = {
-        "auto_send_enabled": True,
-        "turn_used": False,
-        "turn_cancelled": False,
-        "session_allowed": True,
-        "session_cooling": False,
-        "text": "这场雨下得太大了吧",
-        "ratio": 1.0,
-        "roll": 0.0,
-        "has_candidate": True,
-    }
-    base.update(overrides)
-    return GateInput(**base)
 
 
 def _memo(memo_id: int, *, scope: str = SCOPE_ANY, origin: str | None = "g:1") -> Memo:
@@ -62,16 +32,35 @@ def _memo(memo_id: int, *, scope: str = SCOPE_ANY, origin: str | None = "g:1") -
     )
 
 
-def test_T17_origin_scope_only_allowed_in_its_session():
-    """仅来源的图只能在原会话发：判定写松了会把「只想在这个群用」的图撒到所有群。"""
+def test_T18_scope_requires_matching_session_and_fails_closed():
+    """仅来源的图只能在原会话发；取不到会话标识时一律拒绝。
+
+    判定写松了（跨会话放行、或把 None 当通配）等于把「只想在这个群用」的图撒到所有群，
+    而发出去的图本身看不出是从哪来的。
+    """
     memo = _memo(1, scope=SCOPE_ORIGIN, origin="aiocqhttp:GroupMessage:1")
     assert scope_allows(memo, "aiocqhttp:GroupMessage:1") is True
     assert scope_allows(memo, "aiocqhttp:GroupMessage:2") is False
-
-
-def test_T18_missing_session_identifier_fails_closed():
-    """取不到会话标识时必须拒绝：fail-open 等于把「仅来源」的限制整体取消。"""
-    memo = _memo(1, scope=SCOPE_ORIGIN)
-    assert scope_allows(memo, None) is False
-    assert scope_allows(memo, "") is False
+    # 取不到会话标识 = fail-closed，不能当成通配
+    assert scope_allows(_memo(3, scope=SCOPE_ORIGIN), None) is False
+    assert scope_allows(_memo(3, scope=SCOPE_ORIGIN), "") is False
+    # 全库可用的图不受影响
     assert scope_allows(_memo(2), None) is True
+
+
+def test_humanized_delay_bounds_and_zero_base():
+    """延迟拟人化的两条硬边界：base=0 必须保持 0（用户要立即发），
+    其余情况要落在 [base*0.75+文本因子, base*1.25+文本因子] 内。
+
+    写坏成「base=0 也加抖动」会让关延迟的用户开始看到延迟；
+    抖动系数跑飞则回到固定秒数，等于没做。
+    """
+    assert humanized_delay(0, "随便说点什么", 0.5) == 0.0
+    text = "今天这场雨下得也太大了，出门就湿透了"
+    extra = min(2.0, visible_length(text) / 30.0)
+    low = humanized_delay(5, text, 0.0)
+    high = humanized_delay(5, text, 1.0)
+    assert low == 5 * 0.75 + extra
+    assert high == 5 * 1.25 + extra
+    mid = humanized_delay(5, text, 0.5)
+    assert low < mid < high

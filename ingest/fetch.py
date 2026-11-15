@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
+import logging
 import uuid
 from dataclasses import dataclass
 from io import BytesIO
@@ -17,7 +19,9 @@ from pathlib import Path
 
 from ..domain import MediaRef
 from . import security
-from .fingerprints import content_hash, percept_hash
+from .fingerprints import animated_percept_hash, content_hash, percept_hash
+
+logger = logging.getLogger(__name__)
 
 ALLOWED_EXTS: tuple[str, ...] = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".apng")
 MAX_REDIRECTS = 3
@@ -203,8 +207,15 @@ async def fetch_media(ref: MediaRef, limits: FetchLimits, tmp_dir: Path) -> Fetc
         from PIL import Image
 
         with Image.open(BytesIO(data)) as image:
-            percept = percept_hash(image)
-    except Exception:
+            if animated:
+                # 动图用三帧复合指纹：只比首帧会把「首帧相同、后续不同」的
+                # 两个动画判成同一张；三帧都在阈值内才算重复。
+                percept = animated_percept_hash(image)
+            else:
+                percept = percept_hash(image)
+    except Exception as exc:
+        # 解码不出可选指纹：退化为只按字节哈希去重（该图仍正常入库）
+        logger.debug("计算感知指纹失败 type=%s", type(exc).__name__)
         percept = None
 
     media = FetchedMedia(
@@ -217,4 +228,46 @@ async def fetch_media(ref: MediaRef, limits: FetchLimits, tmp_dir: Path) -> Fetc
         is_animated=animated,
     )
     return FetchResult(media, "ok")
+
+
+async def fetch_json(
+    url: str, *, max_bytes: int = 1_000_000, timeout: float = 10.0
+) -> tuple[object | None, str]:
+    """拉一份 JSON（清单/目录用）；返回 (data, error)。
+
+    和图片下载同一套防护：不跟随重定向、每跳都重新过 security、边读边卡体积。
+    """
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover - requirements 已声明
+        return None, "http_client_missing"
+
+    current = url
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            for _ in range(MAX_REDIRECTS + 1):
+                allowed, reason = security.check_url(current)
+                if not allowed:
+                    return None, reason
+                async with client.stream("GET", current) as response:
+                    status = response.status_code
+                    if status in (301, 302, 303, 307, 308):
+                        current = str(response.headers.get("location") or "").strip()
+                        if not current:
+                            return None, "redirect_without_target"
+                        continue
+                    if status != 200:
+                        return None, f"http_{status}"
+                    buffer = bytearray()
+                    async for chunk in response.aiter_bytes(64 * 1024):
+                        buffer.extend(chunk)
+                        if len(buffer) > max_bytes:
+                            return None, "json_too_large"
+                    try:
+                        return json.loads(buffer.decode("utf-8")), ""
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        return None, "json_invalid"
+            return None, "too_many_redirects"
+    except Exception as exc:
+        return None, f"network_{type(exc).__name__}"
 

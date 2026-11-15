@@ -27,13 +27,16 @@ from .config import (
     deprecated_keys,
     load_settings,
 )
-from .domain import STATE_READY, CandidateQuery, MediaRef, Reason
+from .domain import STATE_INBOX, STATE_READY, CandidateQuery, MediaRef, Reason
 from .ingest import analyze, dedup
 from .ingest.collect import plan_collect, collect_refs
+from .ingest.backfill import backfill_percepts
 from .ingest.fetch import FetchLimits, fetch_media
 from .ingest.pipeline import IngestContext, IngestPipeline
+from .ingest.reanalyze import Reanalyzer
+from .integrity import scan as integrity_scan
 from .ingest.throttle import Throttle
-from .publish import gate, pick, sender
+from .publish import gate, pick, punctuation, sender
 from . import embed as emb
 from . import panel_core
 from .embed import Embedder
@@ -47,11 +50,18 @@ from .paths import resolve_within
 from .store import MemoStore
 
 COLLECT_PRIORITY = 10_000
-DECORATE_PRIORITY = -1_000
+DECORATE_PRIORITY = 100
+"""装饰阶段的 priority 越大越早。取正数是为了赶在 t2i、引用前缀这类改链插件
+之前读到原始回复文本——晚于它们执行时，chain 里可能已经没有可用文字了。"""
 TMP_CLEAN_INTERVAL = 30 * 60
 CAPACITY_INTERVAL = 60 * 60
 CACHE_MAX_AGE = 24 * 60 * 60
 """压缩缓存产物的保留时长：过期才清，避免每次发送都重新压一遍。"""
+VISION_PROBE_INTERVAL = 60.0
+"""视觉模型不可用时，间隔多少秒重新探测一次。
+
+宿主在插件启动阶段可能还没把 provider 装好（冷启动顺序、provider 热重载）；
+只在 initialize() 里解析一次的话，拿到空值就永久为空，所有新图都静默落成「其他」。"""
 COMMAND_MARK = "_memenest_command_turn"
 """本回合是指令交互：不补发表情，避免打断管理操作。"""
 # `label_extraction=llm` 时用：只要情绪 key，不要解释，省 token 也省解析
@@ -75,7 +85,9 @@ def _load_prompt() -> str:
     path = Path(__file__).resolve().parent / "prompts" / "classify.txt"
     try:
         template = path.read_text(encoding="utf-8")
-    except OSError:
+    except OSError as exc:
+        # 回落兜底提示词会让打标质量断崖下跌，必须在启动日志里看得见
+        logger.warning("读取 classify.txt 失败，改用兜底提示词 type=%s", type(exc).__name__)
         return FALLBACK_PROMPT
     return analyze.build_prompt(template)
 
@@ -96,8 +108,12 @@ class Main(Star):
         self._collect_override: bool | None = None
         self._collect_restore_task: asyncio.Task[None] | None = None
         self._model_provider_id = ""
+        # 上次探测视觉模型的时间：模型没就绪时按需重试，但不必每张图都探一次
+        self._vision_probe_at = 0.0
         self._prompt = _load_prompt()
         self._maintenance: list[asyncio.Task[None]] = []
+        self._reanalyzer: Reanalyzer | None = None
+        self._reanalyze_task: asyncio.Task[Any] | None = None
 
     # -- 生命周期 ---------------------------------------------------------
 
@@ -132,6 +148,15 @@ class Main(Star):
             vectors=self._vectors,
             label_llm=self._label_llm,
         )
+        self._reanalyzer = Reanalyzer(
+            store=self.store,
+            data_dir=self.data_dir,
+            llm_call=self._llm_call,
+            prompt=self._prompt,
+            log=logger,
+            can_attempt=self._vision_budget_left,
+            on_attempt=self._count_vision_call,
+        )
         # 工具用 @filter.llm_tool 声明式注册（宿主据此在插件详情页展示）；
         # 这里只负责按开关把它们从「可调用列表」里摘掉或放回去。
         for tool_name in ("memenest_search", "memenest_send"):
@@ -140,8 +165,14 @@ class Main(Star):
                     self.context.activate_llm_tool(tool_name)
                 else:
                     self.context.deactivate_llm_tool(tool_name)
-            except Exception:
-                pass
+            except Exception as exc:
+                # 宿主 API 差异不该拖垮启动，但也不能静默：配置没生效要能在日志里看到
+                logger.warning(
+                    "%s 工具开关未生效 tool=%s type=%s",
+                    self._tag(),
+                    tool_name,
+                    type(exc).__name__,
+                )
         self._panel.register()
         if self._settings().embedding_enabled:
             self._reindex_task = asyncio.create_task(
@@ -186,6 +217,10 @@ class Main(Star):
         if self._maintenance:
             await asyncio.gather(*self._maintenance, return_exceptions=True)
         self._maintenance = []
+        reanalyze_task = getattr(self, "_reanalyze_task", None)
+        if reanalyze_task is not None and not reanalyze_task.done():
+            reanalyze_task.cancel()
+            await asyncio.gather(reanalyze_task, return_exceptions=True)
         await asyncio.to_thread(self.store.close)
         self._handles.clear()
         if self._cache is not None:
@@ -301,6 +336,15 @@ class Main(Star):
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, response: Any) -> None:
+        # 两种回合在 LLM 响应阶段就能排除，不必等装饰阶段：
+        # - 带工具调用的回合通常紧接着 memenest_send，再自动补一张就是双发；
+        # - 响应本身已经带图，没必要再加一张。
+        if getattr(response, "tools_call_args", None):
+            return
+        response_chain = getattr(response, "result_chain", None)
+        chain_list = getattr(response_chain, "chain", response_chain)
+        if gate.reply_contains_image(chain_list):
+            return
         await self._schedule_send(event, str(getattr(response, "completion_text", "") or ""))
 
     @filter.on_decorating_result(priority=DECORATE_PRIORITY)
@@ -348,11 +392,23 @@ class Main(Star):
                     "%s 命中收集黑名单 key=%s", self._tag(event), key
                 )
                 return
+        pipeline = self._pipeline
+        inbox_full = False
+        if settings.inbox_cap > 0 and outcome.refs:
+            inbox_full = (
+                await asyncio.to_thread(self.store.count_state, STATE_INBOX)
+                >= settings.inbox_cap
+            )
+        budget_exhausted = False
+        if outcome.refs and pipeline is not None:
+            budget_exhausted = not pipeline.vision_budget_left()
         plan = plan_collect(
             enabled=settings.collect_enabled,
             has_refs=bool(outcome.refs),
             throttle=self.throttle,
             now=time.monotonic(),
+            inbox_full=inbox_full,
+            budget_exhausted=budget_exhausted,
         )
         if not plan.should_collect:
             logger.debug(
@@ -363,7 +419,6 @@ class Main(Star):
                 event.get_platform_name(),
             )
             return
-        pipeline = self._pipeline
         if pipeline is None:
             return
         # 普通收集一律进通用池；「引用收录」走 grab_quoted，那边才绑定人格。
@@ -420,23 +475,33 @@ class Main(Star):
         pool = await self._candidate_pool(persona_id, persona_filter)
         if not pool:
             return tools_core.render_failure(Reason.NO_CANDIDATE, "库里没有可用表情")
-        context = pick.PickContext(
-            umo=umo,
-            keywords=pick.extract_keywords(query) if query else (),
-            recent_ids=await asyncio.to_thread(self.store.recent_ids, 8),
-            persona_id=persona_id,
-            persona_filter=persona_filter,
-        )
         if persona_filter:
             candidates = pick.filter_for_session(pool, umo, persona_id)
         else:
             candidates = pick.filter_scope(pool, umo)
         if label:
             candidates = [memo for memo in candidates if label in memo.all_labels]
-        ranked = sorted(candidates, key=lambda memo: pick.score_memo(memo, context), reverse=True)
-        if not ranked:
+        if not candidates:
             return tools_core.render_failure(Reason.NO_CANDIDATE, "没有符合条件的表情")
-        handles = self._handles.issue(umo, ranked[:5])
+        dispatcher = self._dispatcher
+        if dispatcher is not None:
+            # 与自动发送共用同一套打分：工具搜到的和自动发的应该是同一批候选
+            ranked, _via = await dispatcher.rank_pool(candidates, query)
+            ordered = [memo for _score, memo in ranked]
+        else:
+            context = pick.PickContext(
+                umo=umo,
+                keywords=pick.extract_keywords(query) if query else (),
+                recent_ids=await asyncio.to_thread(self.store.recent_ids, 8),
+                persona_id=persona_id,
+                persona_filter=persona_filter,
+            )
+            ordered = sorted(
+                candidates,
+                key=lambda memo: pick.score_memo(memo, context),
+                reverse=True,
+            )
+        handles = self._handles.issue(umo, ordered[:5])
         return tools_core.render_candidates(handles)
 
     async def tool_send(self, event: AstrMessageEvent, token: str) -> str:
@@ -461,6 +526,10 @@ class Main(Star):
     @property
     def pipeline(self) -> IngestPipeline | None:
         return self._pipeline
+
+    @property
+    def dispatcher(self):
+        return self._dispatcher
 
     def remove_rel_file(self, rel_path: str) -> None:
         target = resolve_within(self.data_dir, rel_path)
@@ -500,7 +569,8 @@ class Main(Star):
             return None
         try:
             return panel_core.thumb_bytes(path)
-        except Exception:
+        except Exception as exc:
+            logger.debug("拉黑前留缩略图失败 type=%s", type(exc).__name__)
             return None
 
     def command_name(self) -> str:
@@ -533,8 +603,91 @@ class Main(Star):
         """面板导入的并发上限：复用 worker_count（「同时处理几张图」）。"""
         return max(1, int(self._settings().worker_count))
 
+    def vision_budget_state(self) -> dict[str, int]:
+        """面板要的识图预算状态：今日已用 / 上限（0 = 不限）。"""
+        pipeline = self._pipeline
+        used = 0
+        if pipeline is not None:
+            _day, used = pipeline.vision_usage()
+        return {"used": used, "limit": int(self._settings().daily_vision_budget)}
+
+    # -- 重新识图（把识图失效期间落下的无描述条目救回来） ------------------
+
+    def _vision_budget_left(self) -> bool:
+        pipeline = self._pipeline
+        return pipeline.vision_budget_left() if pipeline is not None else False
+
+    def _count_vision_call(self) -> None:
+        pipeline = self._pipeline
+        if pipeline is not None:
+            pipeline.note_vision_call()
+
+    def reanalyze_state(self, scope: str = "empty", ids: list[int] | None = None) -> dict[str, Any]:
+        """面板用：当前进度 + 这次会处理多少条。"""
+        reanalyzer = self._reanalyzer
+        if reanalyzer is None:
+            return {"running": False, "total": 0, "done": 0, "filled": 0, "failed": 0,
+                    "message": "", "pending": 0}
+        state = reanalyzer.state.snapshot()
+        try:
+            state["pending"] = len(reanalyzer.targets(scope, ids))
+        except Exception as exc:
+            logger.debug("统计重新识图目标失败 type=%s", type(exc).__name__)
+            state["pending"] = 0
+        return state
+
+    async def run_reanalyze(self, scope: str, ids: list[int] | None, *, reserved: bool) -> Any:
+        """执行重新识图；reserved=True 表示调用方已经用 try_begin 占过位。"""
+        reanalyzer = self._reanalyzer
+        if reanalyzer is None:
+            return {"ok": False, "message": "重新识图不可用"}
+        if not reserved and not reanalyzer.try_begin():
+            return {"ok": False, "message": "已经在重新识图了"}
+        targets = await asyncio.to_thread(reanalyzer.targets, scope, ids)
+        if not targets:
+            reanalyzer.state.running = False
+            reanalyzer.state.message = "没有需要重新识图的条目"
+            return {"ok": True, "total": 0, "filled": 0, "failed": 0}
+        return await reanalyzer.run_and_release(targets)
+
+    def try_begin_reanalyze(self) -> bool:
+        reanalyzer = self._reanalyzer
+        return bool(reanalyzer is not None and reanalyzer.try_begin())
+
+    def start_reanalyze(self, scope: str, ids: list[int] | None) -> bool:
+        """占位并起后台任务；返回是否真的启动了。"""
+        if not self.try_begin_reanalyze():
+            return False
+        self._reanalyze_task = asyncio.create_task(
+            self.run_reanalyze(scope, ids, reserved=True),
+            name="memenest-reanalyze",
+        )
+        return True
+
+    # -- 完整性体检 -------------------------------------------------------
+
+    async def integrity(self) -> dict[str, Any]:
+        """库与磁盘对账（只读）。"""
+        return await asyncio.to_thread(integrity_scan, self.data_dir, self.store)
+
+    async def integrity_vacuum(self) -> dict[str, int]:
+        from .integrity import vacuum as _vacuum
+
+        return await asyncio.to_thread(_vacuum, self.store)
+
+    async def integrity_drop_orphans(self, paths: list[str] | None = None) -> dict[str, int]:
+        from .integrity import remove_orphans
+
+        return await asyncio.to_thread(remove_orphans, self.data_dir, self.store, paths)
+
+    async def integrity_drop_missing(self) -> dict[str, int]:
+        from .integrity import remove_missing
+
+        return await asyncio.to_thread(remove_missing, self.data_dir, self.store)
+
     def model_available(self) -> bool:
-        return bool(self._model_provider_id)
+        # 用带重试的解析：面板上的「有没有视觉模型」必须反映此刻的真实状态
+        return bool(self._vision_provider())
 
     def queue_depth(self) -> int:
         pipeline = self._pipeline
@@ -553,6 +706,8 @@ class Main(Star):
             "失败": ing.failed,
             "未收录": ing.rejected,
             "队列丢弃": ing.dropped_full,
+            # 只在这批里出现过才有意义：非 0 就说明识图没生效，收进来的图没描述
+            "缺模型": ing.no_model,
         }
         if dispatcher is not None:
             data.update(
@@ -783,7 +938,14 @@ class Main(Star):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.warning("%s 向量回填失败 type=%s", self._tag(), type(exc).__name__)
+            logger.warning("%s 补齐失败 type=%s", self._tag(), type(exc).__name__)
+
+    async def _backfill_percepts(self, limit: int = 600) -> dict[str, int]:
+        """给没有感知指纹的条目补算，返回 {filled, skipped}。
+
+        实现放在 ingest/backfill，这里只负责选目录与记账（便于单测）。
+        """
+        return await backfill_percepts(self.store, Path(self.data_dir), limit=limit)
 
     def try_begin_reindex(self) -> bool:
         """同步占位，避免「检查 running」与「真正开始」之间的 await 间隙。
@@ -801,13 +963,51 @@ class Main(Star):
         """增量补缺或全量重算；同一时刻只允许一个任务。
 
         reserved=True 表示调用方已经用 try_begin_reindex 占过位，这里不再重复占。
+
+        占位之后**所有**路径都必须走 finally 释放：这里任何一步抛异常（库写失败、
+        provider 报错），只要 running 停在 True，「补齐」就会永久返回「已经在补算了」，
+        而且面板上看不出任何异常——只能重载插件才好。
         """
         if not reserved and not self.try_begin_reindex():
             return {"ok": False, "message": "已经在补算了"}
+        try:
+            return await self._run_reindex_locked(full=full)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "%s 补齐失败 type=%s", self._tag(), type(exc).__name__
+            )
+            return {"ok": False, "message": f"补齐失败（{type(exc).__name__}）"}
+        finally:
+            self._reindex = {"running": False, **self._reindex_done()}
+
+    def _reindex_done(self) -> dict[str, int]:
+        done = int(self._reindex.get("done", 0) or 0)
+        total = int(self._reindex.get("total", 0) or 0)
+        return {"done": done, "total": total}
+
+    async def _run_reindex_locked(self, *, full: bool) -> dict[str, Any]:
+        """占位已就绪后的实际流程；异常由 run_reindex 统一兜住并释放占位。"""
+        # 感知指纹与向量互不依赖：没有向量模型时也要补，否则近似去重一直是瞎的
+        percept = await self._backfill_percepts()
+        if percept["filled"] or percept["skipped"]:
+            logger.info(
+                "%s 感知指纹回填 filled=%s skipped=%s",
+                self._tag(),
+                percept["filled"],
+                percept["skipped"],
+            )
         embedder = self._resolve_embedder()
         if embedder is None:
-            self._reindex = {"running": False, "done": 0, "total": 0}
-            return {"ok": False, "message": "没有可用的向量模型"}
+            return {
+                "ok": True,
+                "written": 0,
+                "failed": 0,
+                "percept_filled": percept["filled"],
+                "percept_skipped": percept["skipped"],
+                "message": "没有可用的向量模型，只补了感知指纹",
+            }
 
         store = self.store
         model = embedder.model
@@ -870,11 +1070,10 @@ class Main(Star):
                 self._reindex["done"] = covered + len(filled)
                 await asyncio.sleep(0)  # 让出控制权，别卡消息处理
         finally:
-            self._reindex = {
-                "running": False,
-                "done": covered + len(filled),
-                "total": expected,
-            }
+            # 进度归位：running 由外层 run_reindex 的 finally 统一释放，
+            # 这里只保住最终计数，避免两处都写 running 造成状态打架。
+            self._reindex["done"] = covered + len(filled)
+            self._reindex["total"] = expected
         logger.info(
             "%s 向量回填完成 written=%s failed=%s total=%s",
             self._tag(),
@@ -882,7 +1081,13 @@ class Main(Star):
             failed,
             expected,
         )
-        return {"ok": True, "written": written, "failed": failed}
+        return {
+            "ok": True,
+            "written": written,
+            "failed": failed,
+            "percept_filled": percept["filled"],
+            "percept_skipped": percept["skipped"],
+        }
 
     def vector_state(self) -> dict[str, Any]:
         """面板要的向量状态：模型、覆盖率、是否在重建。"""
@@ -893,7 +1098,11 @@ class Main(Star):
             try:
                 dim = getattr(embedder, "dim", 0)
                 covered, expected = self.store.embedding_coverage(model, dim)
-            except Exception:
+            except Exception as exc:
+                # 面板显示 0/0 时得能看出是「查询失败」而不是「一条都没算」
+                logger.debug(
+                    "%s 向量覆盖率查询失败 type=%s", self._tag(), type(exc).__name__
+                )
                 covered = expected = 0
         state = dict(self._reindex)
         state.update(
@@ -916,12 +1125,14 @@ class Main(Star):
         if wanted:
             try:
                 provider = self.context.get_provider_by_id(wanted)
-            except Exception:
+            except Exception as exc:
+                logger.debug("读取指定的向量模型失败 type=%s", type(exc).__name__)
                 provider = None
         if provider is None:
             try:
                 providers = self.context.get_all_embedding_providers() or []
-            except Exception:
+            except Exception as exc:
+                logger.debug("枚举向量模型失败 type=%s", type(exc).__name__)
                 providers = []
             provider = providers[0] if providers else None
         if provider is None or not hasattr(provider, "get_embedding"):
@@ -945,27 +1156,24 @@ class Main(Star):
         不处理另外两级优先级——会话强制（`session_service_config.persona_id`）
         和当前对话（`conversation.persona_id`）。那两级要拿 `event` 和
         `conversation_manager` 才能查，而这里只有 umo。
+
+        读配置失败直接抛给调用方：人格解析不出来会让人格过滤静默退化成
+        「只发通用」，那是不报错的错误行为，宁可让它显式失败。
         """
         if not umo:
             return None
-        try:
-            config = self.context.get_config(umo)
-        except Exception:
-            return None
+        config = self.context.get_config(umo)
         if not hasattr(config, "get"):
             return None
-        try:
-            agent = config.get("agent_runner") or {}
-            runner_config = agent.get("config") or {}
-            if agent.get("runner_type") == "local":
-                persona = runner_config.get("persona") or {}
-                persona_id = str(persona.get("persona_id") or "").strip()
-            else:
-                # 第三方 runner 的配置里没有 persona 段落，人格由远端决定
-                persona_id = ""
-            return persona_id or None
-        except Exception:
-            return None
+        agent = config.get("agent_runner") or {}
+        runner_config = agent.get("config") or {}
+        if agent.get("runner_type") == "local":
+            persona = runner_config.get("persona") or {}
+            persona_id = str(persona.get("persona_id") or "").strip()
+        else:
+            # 第三方 runner 的配置里没有 persona 段落，人格由远端决定
+            persona_id = ""
+        return persona_id or None
 
     # -- 视觉模型 ---------------------------------------------------------
 
@@ -977,7 +1185,8 @@ class Main(Star):
             logger.warning("%s 配置的视觉模型不存在，回落到全局图片描述模型", self._tag())
         try:
             host_config = self.context.get_config()
-        except Exception:
+        except Exception as exc:
+            logger.debug("读取宿主配置失败 type=%s", type(exc).__name__)
             host_config = {}
         fallback = ""
         if hasattr(host_config, "get"):
@@ -998,11 +1207,45 @@ class Main(Star):
             return True
         try:
             return getter(provider_id) is not None
-        except Exception:
+        except Exception as exc:
+            # 探测本身出错时按「不可用」处理：_vision_provider 会退避重试，
+            # 这里留 DEBUG 说明是探测失败而不是 provider 真不存在。
+            logger.debug("探测 provider 失败 type=%s", type(exc).__name__)
             return False
 
+    def _vision_provider(self) -> str:
+        """当前可用的视觉模型 id；取不到就按需重试解析（有探测间隔）。
+
+        为什么不能只在 initialize() 里解析一次：宿主冷启动时插件可能先于 provider
+        加载完成，`get_provider_by_id` 这时查不到 → 解析结果为空 → 一直为空，
+        于是每一张新图都按「模型不可用」落成兜底类 `other`（无描述），
+        而这条退化只有 DEBUG 日志。实测部署端就是这样连续攒了 284 条无描述条目。
+        """
+        current = self._model_provider_id
+        if current and self._provider_exists(current):
+            return current
+        now = time.monotonic()
+        if (
+            not current
+            and self._vision_probe_at
+            and now - self._vision_probe_at < VISION_PROBE_INTERVAL
+        ):
+            # 空值且刚探测过：别每张图都去查一遍 provider 表
+            return ""
+        self._vision_probe_at = now
+        resolved = self._resolve_vision_provider()
+        if resolved != current:
+            if resolved:
+                logger.info(
+                    "%s 视觉模型已就绪 provider=%s（识图恢复）", self._tag(), resolved
+                )
+            elif current:
+                logger.warning("%s 视觉模型已失效 provider=%s", self._tag(), current)
+            self._model_provider_id = resolved
+        return resolved
+
     def _llm_call(self):
-        provider_id = self._model_provider_id
+        provider_id = self._vision_provider()
         if not provider_id:
             return None
 
@@ -1022,7 +1265,7 @@ class Main(Star):
         只在用户显式把配置切到 llm 时才会被调用：每条消息多一次模型请求，
         换来的是反讽、上下文这类向量读不准的东西能读对。
         """
-        provider_id = self._model_provider_id
+        provider_id = self._vision_provider()
         if not provider_id or not text.strip():
             return ""
         prompt = LABEL_PROMPT.format(text=text.strip()[:200])

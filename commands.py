@@ -6,11 +6,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Any
 
 from . import commands_core as core
 from .ingest.collect import image_sources
+
+logger = logging.getLogger(__name__)
 
 class CommandRunner:
     def __init__(self, plugin: Any) -> None:
@@ -121,7 +124,10 @@ def _is_admin(event: Any) -> bool:
     if callable(checker):
         try:
             return bool(checker())
-        except Exception:
+        except Exception as exc:
+            # fail-closed：拿不到管理员判定就按「不是管理员」拒绝，
+            # 但必须留痕——否则宿主 API 一变，所有管理指令都静默失效。
+            logger.warning("管理员判定失败，按非管理员处理 type=%s", type(exc).__name__)
             return False
     return getattr(event, "role", "") == "admin"
 

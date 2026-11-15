@@ -7,10 +7,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 from array import array
 from dataclasses import dataclass
 from typing import Any, Iterable
+
+logger = logging.getLogger(__name__)
 
 
 # 维度只在 provider 拿不到时使用；正常路径永远以 provider.get_dim() 为准
@@ -51,7 +54,6 @@ def dot(a: tuple[float, ...], b: tuple[float, ...]) -> float:
 KIND_TEXT = "text"
 KIND_CAPTION = "caption"
 KIND_SCENE = "scene"
-KINDS = (KIND_TEXT, KIND_CAPTION, KIND_SCENE)
 
 
 def vectors_for(
@@ -81,7 +83,11 @@ def vectors_for(
 
 @dataclass(slots=True)
 class Embedder:
-    """把宿主 provider 包成「永远不抛异常」的样子：失败返回 None，由调用方降级。"""
+    """把宿主 provider 包成「失败返回 None、由调用方降级」的样子。
+
+    降级不等于静默：单条失败走 DEBUG、批量失败走 WARNING——
+    批量整体挂掉通常意味着模型/网络真的出问题了，得能在日志里看见。
+    """
 
     provider: Any
     model: str
@@ -91,7 +97,14 @@ class Embedder:
     def dim(self) -> int:
         try:
             return int(self.provider.get_dim())
-        except Exception:  # provider 实现各异，拿不到就用默认
+        except Exception as exc:
+            # 维度拿不到就回落 768；若真实维度不是 768，vectors.py 会把全部向量
+            # 当成「维度不符」丢掉，语义检索静默全空——所以这里必须留痕。
+            logger.warning(
+                "embedding 维度读取失败，回落 %s type=%s",
+                FALLBACK_DIM,
+                type(exc).__name__,
+            )
             return FALLBACK_DIM
 
     async def embed(self, text: str) -> tuple[float, ...] | None:
@@ -100,7 +113,8 @@ class Embedder:
             return None
         try:
             raw = await asyncio.wait_for(self.provider.get_embedding(text), self.timeout)
-        except Exception:  # 超时/网络/协议错误一律降级
+        except Exception as exc:
+            logger.debug("embedding 失败 type=%s", type(exc).__name__)
             return None
         if not raw:
             return None
@@ -119,7 +133,13 @@ class Embedder:
                 raw = await asyncio.wait_for(
                     self.provider.get_embeddings(chunk), self.timeout * 4
                 )
-            except Exception:
+            except Exception as exc:
+                # 批量整体失败会退化成逐条重试（请求量变成 N 倍），必须在日志里可见
+                logger.warning(
+                    "embedding 批量请求失败，退化为逐条重试 size=%s type=%s",
+                    len(chunk),
+                    type(exc).__name__,
+                )
                 raw = None
             if raw is None or len(raw) != len(chunk):
                 for text in chunk:

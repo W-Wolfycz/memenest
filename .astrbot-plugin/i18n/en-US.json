@@ -6,8 +6,8 @@
   },
   "pages": {
     "manager": {
-      "title": "MemeNest Manager",
-      "description": "Browse, approve, block, bind personas and import in bulk."
+      "title": "MemeNest",
+      "description": "Overview and management in one page: library, vision, retrieval, storage and delivery, plus browse, approve, block, bind personas and bulk import."
     }
   }
 }

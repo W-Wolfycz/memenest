@@ -1,0 +1,401 @@
+/* 大盘视图的样式。全部规则挂在 .ov 下，避免与管理视图的 .grid/.card/.chips 冲突。
+ *
+ * 语言沿用管理页：无边框卡片、细线分隔、标题小字距、数字等宽对齐；
+ * 强调色只有三处——待办（红）、健康（绿）、链接（蓝）。 */
+
+.ov {
+  --ov-warm: #c8891f;
+  --ov-card-shadow: 0 1px 2px rgba(23, 24, 26, 0.06), 0 1px 10px rgba(23, 24, 26, 0.04);
+  /* 与管理页同一套边距：.top / .toolbar 都是 34px 内缩 */
+  padding: 0 34px 40px;
+}
+
+[data-theme="dark"] .ov {
+  --ov-card-shadow: 0 1px 3px rgba(0, 0, 0, 0.6), 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+/* ---------- 顶部：一排大数字 + 更新时间 ---------- */
+
+.ov-hero {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 4px 0 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.ov-stats {
+  display: flex;
+  align-items: baseline;
+  gap: 26px;
+  flex-wrap: wrap;
+}
+
+.ov-stat {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.ov-stat span {
+  color: var(--muted);
+  font: 400 11px/1.4 var(--font-ui);
+  letter-spacing: 0.14em;
+}
+
+.ov-stat b {
+  font: 400 26px/1 var(--font-serif);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.ov-stat i {
+  color: var(--muted);
+  font: 400 11px/1 var(--font-ui);
+  font-style: normal;
+}
+
+.ov-stat.hot b {
+  color: var(--danger);
+}
+
+.ov-stat.ok b {
+  color: var(--olive);
+}
+
+.ov-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* ---------- 健康问题：左侧细色条，不做填充 ---------- */
+
+.ov-alerts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 14px 0 4px;
+}
+
+.ov-alert {
+  padding: 5px 0 5px 12px;
+  border-left: 2px solid var(--line);
+  color: var(--ink);
+  font: 400 12px/1.6 var(--font-ui);
+}
+
+.ov-alert.error {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.ov-alert.warn {
+  border-color: var(--warn);
+}
+
+.ov-alert.info {
+  color: var(--muted);
+}
+
+/* ---------- 区块 ---------- */
+
+.ov-grid {
+  display: grid;
+  align-items: stretch;
+  gap: 16px;
+  margin-top: 18px;
+}
+
+.ov-grid.three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.ov-grid.two {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr);
+}
+
+.ov-grid.one {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.ov-grid.spaced {
+  margin-top: 26px;
+}
+
+@media (max-width: 900px) {
+  .ov-grid.three,
+  .ov-grid.two {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.ov-block {
+  padding: 16px 18px 14px;
+  min-width: 0;
+  /* 不给底色也不描边：同色纸面上只靠一层很淡的投影分出边界 */
+  background: transparent;
+  border-radius: 4px;
+  box-shadow: 0 1px 3px rgba(23, 24, 26, 0.08), 0 4px 14px rgba(23, 24, 26, 0.05);
+}
+
+[data-theme="dark"] .ov-block {
+  box-shadow: var(--ov-card-shadow);
+}
+
+.ov-block h2 {
+  margin: 0 0 8px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+  font: 500 11px/1.4 var(--font-ui);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.ov-block h2 .hint {
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.ov-block .hint {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font: 400 11px/1.7 var(--font-ui);
+}
+
+/* ---------- 行：标签在左、数字右对齐 ---------- */
+
+.ov-rows {
+  display: flex;
+  flex-direction: column;
+}
+
+.ov-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 4px 0;
+  border-bottom: 1px dotted var(--line);
+}
+
+.ov-row:last-child {
+  border-bottom: 0;
+}
+
+.ov-row span {
+  color: var(--muted);
+  font: 400 12px/1.5 var(--font-ui);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ov-row b {
+  color: var(--ink);
+  font: 400 13px/1.5 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ov-row.hot b {
+  color: var(--danger);
+}
+
+.ov-row.ok b {
+  color: var(--olive);
+}
+
+.ov-row.muted b {
+  color: var(--muted);
+}
+
+/* ---------- 细进度条 ---------- */
+
+.ov-track {
+  height: 3px;
+  margin-top: 8px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.ov-track.big {
+  height: 4px;
+}
+
+.ov-track i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 0.2s ease-out;
+}
+
+.ov-track i.warn {
+  background: var(--danger);
+}
+
+/* ---------- 标签分布：名字 + 细条 + 次数 ---------- */
+
+.ov-bars {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 2px 26px;
+}
+
+.ov-bar-row {
+  display: grid;
+  grid-template-columns: 34px 1fr 34px;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.ov-bar-row span {
+  color: var(--muted);
+  font: 400 11px/1.4 var(--font-ui);
+  letter-spacing: 0.02em;
+}
+
+.ov-bar-row b {
+  color: var(--ink);
+  font: 400 11px/1.4 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.ov-bar-row .ov-track {
+  margin: 0;
+}
+
+.ov-bar-row.is-zero span,
+.ov-bar-row.is-zero b {
+  color: var(--line);
+}
+
+/* ---------- 发送记录 ---------- */
+
+.ov-sends {
+  display: flex;
+  flex-direction: column;
+}
+
+.ov-send {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px dotted var(--line);
+}
+
+.ov-send:last-child {
+  border-bottom: 0;
+}
+
+.ov-send-thumb {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--plate);
+  color: var(--muted);
+  font: 400 9px/1 var(--font-mono);
+  overflow: hidden;
+}
+
+.ov-send-thumb img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.ov-send-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.ov-send-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ov-send-line time {
+  color: var(--muted);
+  font: 400 11px/1.4 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ov-send-line b {
+  color: var(--ink);
+  font: 400 11px/1.4 var(--font-ui);
+  letter-spacing: 0.04em;
+}
+
+.ov-send-body p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font: 400 11px/1.5 var(--font-ui);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- 处置与徽标 ---------- */
+
+.ov-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.ov-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.ov-badge {
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font: 400 10px/1.6 var(--font-mono);
+  letter-spacing: 0.02em;
+}
+
+.ov-link {
+  margin-top: 10px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: 400 12px/1.6 var(--font-ui);
+  cursor: pointer;
+}
+
+.ov-link:hover {
+  text-decoration: underline;
+}
+
+.ov-progress {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* .ov-progress 用 flex 会盖掉 [hidden]，显式关掉 */
+.ov-progress[hidden],
+.ov-alerts[hidden] {
+  display: none;
+}

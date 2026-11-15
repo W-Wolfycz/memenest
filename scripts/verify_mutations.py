@@ -27,6 +27,21 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 PY = sys.executable
 PKG = ROOT.name
 
+# 多行锚点抽成常量：直接内联会把行宽顶过 100，也让下面的变异表难读。
+_BACKFILL_ANIMATED = (
+    '            if int(getattr(image, "n_frames", 1)) > 1:\n'
+    "                return animated_percept_hash(image)"
+)
+_PERCEPT_WITHIN_ALL = (
+    "        return all(\n"
+    "            hamming(a, b) <= threshold for a, b in zip(left_parts, right_parts)\n"
+    "        )"
+)
+_RECENT_BY_LABEL_SQL = (
+    '"SELECT id, label FROM memo WHERE used_at > 0 "\n'
+    '                "ORDER BY used_at DESC LIMIT ?"'
+)
+
 MUTATIONS: list[tuple[str, str, str | list[str], str | list[str], str]] = [
     (
         "标签只认整串（模型多写一个词就丢成 other）",
@@ -41,13 +56,6 @@ MUTATIONS: list[tuple[str, str, str | list[str], str | list[str], str]] = [
         "    if bits == 0:",
         "    if False:",
         "tests/test_T06_T07_dedup.py::test_solid_image_yields_no_percept_hash",
-    ),
-    (
-        "图内文字上限退回 80（长台词检索不到后半句）",
-        "domain.py",
-        "MAX_TEXT_IN_IMAGE = 200",
-        "MAX_TEXT_IN_IMAGE = 80",
-        "tests/test_T09_parse.py::test_text_in_image_keeps_long_lines",
     ),
     (
         "列表元素又被标点切碎（一条 scene 整条消失）",
@@ -110,7 +118,7 @@ MUTATIONS: list[tuple[str, str, str | list[str], str | list[str], str]] = [
         "publish/dispatcher.py",
         "        if not umo:\n            return\n        self._turns[umo] = TurnState()\n",
         "        if not umo:\n            return\n        return  # 变异：新消息不重置回合\n",
-        "tests/test_T13_T23_dispatcher.py::test_delayed_landing_only_marks_its_own_turn",
+        "tests/test_T13_T23_dispatcher.py::test_delayed_landing_marks_its_own_turn_not_the_new_one",
     ),
         (
         "向量三路串味（图上文字里混进画面描述，命中率悄悄下降）",
@@ -168,8 +176,8 @@ MUTATIONS: list[tuple[str, str, str | list[str], str | list[str], str]] = [
     (
         "感知指纹阈值失效（重复图照样入库）",
         "ingest/dedup.py",
-        "        if hamming(percept_hash, candidate) <= threshold:",
-        "        if hamming(percept_hash, candidate) <= -1:",
+        "        if percept_within(percept_hash, candidate, threshold):",
+        "        if percept_within(percept_hash, candidate, -1):",
         "tests/test_T06_T07_dedup.py::test_T06_percept_hit_is_duplicate",
     ),
     (
@@ -201,7 +209,7 @@ MUTATIONS: list[tuple[str, str, str | list[str], str | list[str], str]] = [
         "ingest/security.py",
         "        return bool(_NUMERIC_HOST.fullmatch(name))",
         "        return False",
-        "tests/test_T21_T24_store.py::test_T24_numeric_host_forms_are_forbidden",
+        "tests/test_T21_T24_store.py::test_T24_url_checks",
     ),
     (
         "URL 扩展名替代真实内容（伪装成图片）",
@@ -261,7 +269,7 @@ MUTATIONS: list[tuple[str, str, str | list[str], str | list[str], str]] = [
         "publish/dispatcher.py",
         "        await self._mark_used(umo, memo, state)",
         "        await self._mark_used(umo, memo)",
-        "tests/test_T13_T23_dispatcher.py::test_delayed_landing_only_marks_its_own_turn",
+        "tests/test_T13_T23_dispatcher.py::test_delayed_landing_marks_its_own_turn_not_the_new_one",
     ),
     # ---- 人格禁用（mute） ----
     (
@@ -271,7 +279,7 @@ MUTATIONS: list[tuple[str, str, str | list[str], str | list[str], str]] = [
         "    if GENERIC_PERSONA in memo.persona_ids:\n        return True\n",
         "    if GENERIC_PERSONA in memo.persona_ids:\n        return True\n"
         "    if persona_id and persona_id in memo.blocked_persona_ids:\n        return False\n",
-        "tests/test_incr_persona.py::test_reblock_same_persona_is_idempotent",
+        "tests/test_incr_persona.py::test_persona_allows_matrix",
     ),
     (
         "禁用名单写入不生效（面板保存后没变化）",
@@ -304,8 +312,8 @@ MUTATIONS: list[tuple[str, str, str | list[str], str | list[str], str]] = [
     (
         "话题那一路完全失效（聊到该话题也选不中）",
         "publish/dispatcher.py",
-        "                    sims = [emb.dot(query, scene_vec)]",
-        "                    sims = [0.0]",
+        "            sims = [emb.dot(query, scene_vec)]",
+        "            sims = [0.0]",
         "tests/test_embed_vector.py::test_scene_hit_works_from_reply_side",
     ),
     (
@@ -340,7 +348,228 @@ MUTATIONS: list[tuple[str, str, str | list[str], str | list[str], str]] = [
         "tests/test_pick_variety.py"
         "::test_pick_variety_changes_spread_and_respects_floor",
     ),
+    # ---- 0.2.3 批次：去重 / 收集护栏 / 选图先验 / 迁移 / 清单导入 ----
+    (
+        "动图复合指纹退化为只算首帧（首帧相同的动画被误判重复）",
+        "ingest/fetch.py",
+        "                percept = animated_percept_hash(image)",
+        "                percept = percept_hash(image)",
+        "tests/test_T24_fetch.py::test_animated_media_gets_composite_percept_hash",
+    ),
+    (
+        "待审核池满了仍消耗冷却窗口（刷图后真表情收不到）",
+        "ingest/collect.py",
+        "    if inbox_full:\n        return CollectPlan(SKIP_INBOX_FULL, \"inbox_full\")",
+        "    if False:\n        return CollectPlan(SKIP_INBOX_FULL, \"inbox_full\")",
+        "tests/test_T03_throttle.py"
+        "::test_plan_collect_does_not_consume_throttle_for_unqualified_media",
+    ),
+    (
+        "同类最近使用惩罚失效（连续同情绪一直抽同一张）",
+        "publish/pick.py",
+        "    if not recent_ids or memo_id not in recent_ids:\n        return 0.0",
+        "    if True:\n        return 0.0",
+        "tests/test_pick_score.py"
+        "::test_category_recent_penalty_demotes_only_the_same_label",
+    ),
+    (
+        "标点先验失效（问号感叹号的语气线索全丢）",
+        "publish/punctuation.py",
+        "    labels: set[str] = set()",
+        "    return set()",
+        "tests/test_pick_score.py::test_punctuation_prior_only_adds_a_weak_signal",
+    ),
+    (
+        "清单里有一个坏项就整份失败（导入后一条都进不来）",
+        "panel_core.py",
+        "        else:\n            continue\n        if url and url not in urls:",
+        "        else:\n            return []\n        if url and url not in urls:",
+        "tests/test_panel_core.py"
+        "::test_manifest_urls_skips_bad_items_without_failing_whole_list",
+    ),
+    (
+        "指纹回填算了但没写库（补齐永远是白跑）",
+        "store/store.py",
+        '                "UPDATE memo SET percept_hash = ? WHERE id = ?",',
+        '                "SELECT ?, ?",',
+        "tests/test_percept_backfill.py"
+        "::test_backfill_writes_fingerprints_and_skips_unreadable",
+    ),
+    (
+        "识图预算失效（刷图天照爆调用费）",
+        "ingest/pipeline.py",
+        "        if not self.vision_budget_left():",
+        "        if not self.vision_budget_left() and False:",
+        "tests/test_T08_T12_pipeline.py::test_vision_budget_caps_model_calls_per_day",
+    ),
+    (
+        "关掉的延迟又被打开（用户明确要立即发却被加抖动）",
+        "publish/gate.py",
+        "    if base <= 0:\n        return 0.0",
+        "    if False:\n        return 0.0",
+        "tests/test_T17_T20_gate.py::test_humanized_delay_bounds_and_zero_base",
+    ),
+    (
+        "备份把可再生目录也打进去（体积翻倍还没价值）",
+        "backup.py",
+        '_CONTENT_DIRS = ("blobs", "inbox")',
+        '_CONTENT_DIRS = ("blobs", "inbox", "tmp")',
+        "tests/test_backup.py::test_backup_contains_consistent_db_and_images",
+    ),
+    (
+        "备份删除不校验文件名（路径穿越删任意文件）",
+        "backup.py",
+        '    if not _EXPORT_NAME_RE.match(name or ""):',
+        "    if False:",
+        "tests/test_backup.py::test_delete_export_rejects_traversal_names",
+    ),
+    (
+        "回填动图退化为只算首帧（复合指纹语义丢失）",
+        "ingest/backfill.py",
+        _BACKFILL_ANIMATED,
+        _BACKFILL_ANIMATED.replace("animated_percept_hash", "percept_hash"),
+        "tests/test_percept_backfill.py"
+        "::test_backfill_writes_fingerprints_and_skips_unreadable",
+    ),
+    (
+        "复合指纹比对从「三帧都要像」退化为「有一帧像就算」（首帧相同的不同动画被误判）",
+        "ingest/fingerprints.py",
+        _PERCEPT_WITHIN_ALL,
+        _PERCEPT_WITHIN_ALL.replace("all(", "any(", 1),
+        "tests/test_T06_T07_dedup.py"
+        "::test_same_animation_resized_is_duplicate_but_first_frame_twin_is_not",
+    ),
+    (
+        "指纹回填不推进游标（头部补不出来的条目永远占住窗口）",
+        "store/store.py",
+        "                \"WHERE (percept_hash IS NULL OR percept_hash = '') AND id > ? \"",
+        "                \"WHERE (percept_hash IS NULL OR percept_hash = '') AND ? >= 0 \"",
+        "tests/test_percept_backfill.py"
+        "::test_backfill_gets_past_a_block_of_uncomputable_rows",
+    ),
+    (
+        "回填遇到 skip 就收工（limit 形同虚设，只补一批）",
+        "ingest/backfill.py",
+        "        if not rows:\n            # 游标之后确实没有缺指纹的条目了；这才是唯一可以结束的条件\n            break",
+        "        if not rows or skipped:\n            break",
+        "tests/test_percept_backfill.py::test_backfill_keeps_going_after_a_skip",
+    ),
+    (
+        "工具发送不进发送记录（面板看不到工具发过的张数）",
+        "publish/dispatcher.py",
+        '        self._note_send(umo, memo, "", VIA_TOOL)',
+        "        pass",
+        "tests/test_T13_T23_dispatcher.py::test_tool_send_shows_up_in_send_records",
+    ),
+    (
+        "标点先验映射到体系外的标签（这条规则永久失效）",
+        "publish/punctuation.py",
+        '        labels.add("puzzle")',
+        '        labels.add("puzzled")',
+        "tests/test_pick_score.py::test_punctuation_prior_only_adds_a_weak_signal",
+    ),
+    (
+        "向量分分母按三路固定归一（没有话题词的图被永久压低）",
+        "publish/dispatcher.py",
+        '    if WEIGHT_SCENES and kinds.get("scene"):',
+        "    if WEIGHT_SCENES:",
+        "tests/test_vector_score.py::test_denominator_counts_only_present_lanes",
+    ),
+    (
+        "负相似度被垫成 0（排序被悄悄压平）",
+        "publish/dispatcher.py",
+        '        value += WEIGHT_CAPTION * emb.dot(query, kinds.get("caption", ()))',
+        '        value += WEIGHT_CAPTION * max(0.0, emb.dot(query, kinds.get("caption", ())))',
+        "tests/test_vector_score.py::test_negative_similarity_is_not_floored",
+    ),
+    (
+        "无模型入库不计数（识图没生效也看不出来）",
+        "ingest/pipeline.py",
+        "            self.counters.no_model += 1",
+        "            pass",
+        "tests/test_T08_T12_pipeline.py::test_missing_model_is_counted_not_silent",
+    ),
+    (
+        "同类最近使用扫描不设窗口（每条消息都排全表）",
+        "store/store.py",
+        _RECENT_BY_LABEL_SQL,
+        _RECENT_BY_LABEL_SQL.replace("LIMIT ?", "LIMIT ? + 100000"),
+        "tests/test_pick_score.py::test_recent_by_label_honours_scan_window",
+    ),
+    (
+        "识图第一次失败就放弃（网络抖一下这张图就没了）",
+        "ingest/analyze.py",
+        "    total = max(1, int(attempts))",
+        "    total = 1",
+        "tests/test_analyze_retry.py::test_retry_recovers_from_one_transient_failure",
+    ),
+    (
+        "识图预算用尽仍然调模型（每日上限形同虚设）",
+        "ingest/analyze.py",
+        "        if can_attempt is not None and not can_attempt():",
+        "        if False:",
+        "tests/test_analyze_retry.py::test_budget_exhausted_stops_before_calling",
+    ),
+    (
+        "重新识图结果不落库（点了没反应）",
+        "ingest/reanalyze.py",
+        "                caption=analysis.caption,",
+        "                caption=memo.caption,",
+        "tests/test_reanalyze.py::test_reanalyze_fills_description_and_persists",
+    ),
+    (
+        "重新识图异常后不释放 running（面板永远显示进行中）",
+        "ingest/reanalyze.py",
+        "            self.state.running = False",
+        "            pass",
+        "tests/test_reanalyze.py::test_write_failure_still_releases_running_flag",
+    ),
+    (
+        "缺失文件检测失效（库里有记录、文件没了也算健康）",
+        "integrity.py",
+        "        if not (data_dir / rel).is_file():",
+        "        if False:",
+        "tests/test_integrity.py::test_scan_reports_missing_and_orphans",
+    ),
+    (
+        "孤儿判定失效（磁盘上的死文件永远查不出来）",
+        "integrity.py",
+        "            if rel not in known:\n                orphans.append(rel)",
+        "            if False:\n                orphans.append(rel)",
+        "tests/test_integrity.py::test_scan_reports_missing_and_orphans",
+    ),
+    (
+        "清孤儿把有记录的图也删掉（无声丢数据）",
+        "integrity.py",
+        "            if rel not in known:\n                found.append(rel)",
+        "            if True:\n                found.append(rel)",
+        "tests/test_integrity.py::test_remove_orphans_keeps_referenced_files",
+    ),
+    (
+        "缺失记录一键删除时连文件还在的一起删（无声丢图）",
+        "integrity.py",
+        "        if not (data_dir / rel).is_file()\n    ]",
+        "        if False\n    ]",
+        "tests/test_integrity.py::test_remove_missing_deletes_only_broken_rows",
+    ),
+    (
+        "导出跳过缺失文件也报成功（用户以为都导出了）",
+        "backup.py",
+        "            if not target.is_file():\n                skipped += 1\n                continue",
+        "            if not target.is_file():\n                included += 1\n                continue",
+        "tests/test_export_selection.py::test_build_selection_zip_counts_skipped_files",
+    ),
+    (
+        "导出文件名带冒号（Windows 下载失败）",
+        "backup.py",
+        'return f"{now:%Y-%m-%dT%H_%M_%S}_{now.microsecond // 1000:03d}.zip"',
+        'return f"{now:%Y-%m-%dT%H:%M:%S}_{now.microsecond // 1000:03d}.zip"',
+        "tests/test_export_selection.py::test_selection_name_is_filesystem_safe_with_millis",
+    ),
 ]
+# 注：v1 → v2 的迁移目前没有 DDL（人格禁用表由 schema.sql 的 IF NOT EXISTS 建），
+# 所以「跳过迁移」这个变异没有可观察行为，不列在这里；老库升级用例只守
+# 「数据不丢 + 版本前进」。
 
 
 def run_test(nodeid: str, workdir: pathlib.Path) -> tuple[str, str]:

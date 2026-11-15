@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,7 +38,8 @@ from ..domain import (
 )
 from ..store import MemoStore
 from .vectors import VectorStore
-from . import gate, pick
+from . import gate, pick, punctuation
+from .pick import score_memo
 from .candidates import CandidateCache
 from .compress import CACHE_SUBDIR, compress_for_send
 
@@ -86,8 +87,74 @@ class DeliveryStats:
 # 向量取前 K 名后再叠多样性，避免同一语境永远同一张
 VECTOR_TOP_K = 20
 
+# 发送来源标记（面板「发送记录」的 via 字段）：前端按这三个值显示「向量 / 关键词 / 工具」。
+VIA_VECTOR = "vector"
+VIA_KEYWORD = "keyword"
+VIA_TOOL = "tool"
+
+# 向量路里两项微调的量级（比 delta 小一个数量级，只动同分附近的排序）
+VECTOR_CATEGORY_PENALTY = 0.02
+VECTOR_PRIOR_BONUS = 0.02
+
 DeliverFn = Callable[[str, Path], Awaitable[bool]]
 PersonaResolver = Callable[[str], str | None]
+
+
+def score_vector_entry(
+    memo: Memo,
+    kinds: dict[str, Any],
+    query: tuple[float, ...],
+    context_query: tuple[float, ...] | None,
+    *,
+    label_bonus: float = 0.0,
+    recent_by_label: dict[str, tuple[int, ...]] | None = None,
+    expected_labels: set[str] | frozenset[str] | None = None,
+) -> float | None:
+    """一条候选的向量分（三路加权余弦 + 标签 + 同类避让 + 标点先验）。
+
+    两条路共用同一份口径：真实挑图和面板「试一试」的预览。分开写两份的话，
+    调权重时预览和实际行为会悄悄不一致，那这个预览工具就白做了。
+    """
+    total_weight = 0.0
+    if WEIGHT_TEXT and kinds.get("text"):
+        total_weight += WEIGHT_TEXT
+    if WEIGHT_CAPTION and kinds.get("caption"):
+        total_weight += WEIGHT_CAPTION
+    if WEIGHT_SCENES and kinds.get("scene"):
+        total_weight += WEIGHT_SCENES
+    if WEIGHT_LABEL:
+        total_weight += WEIGHT_LABEL
+    if total_weight <= 0:
+        total_weight = 1.0
+
+    value = 0.0
+    if WEIGHT_TEXT:
+        value += WEIGHT_TEXT * emb.dot(query, kinds.get("text", ()))
+    if WEIGHT_CAPTION:
+        value += WEIGHT_CAPTION * emb.dot(query, kinds.get("caption", ()))
+    if WEIGHT_SCENES:
+        # 话题词没有说话人：机器人自己在聊这个话题、还是用户在聊，都该用这张图。
+        # 取两路较高的那个，避免同一句话两边都算成双倍权重。
+        # 注意别拿 0.0 兜底——余弦可能为负，垫个 0 等于给这一路偷偷加了个 ReLU，
+        # 和 text/caption 两路的口径就不一致了。
+        scene_vec = kinds.get("scene", ())
+        if scene_vec:
+            sims = [emb.dot(query, scene_vec)]
+            if context_query is not None:
+                sims.append(emb.dot(context_query, scene_vec))
+            value += WEIGHT_SCENES * max(sims)
+    if WEIGHT_LABEL:
+        value += WEIGHT_LABEL * label_bonus
+    # 同类最近使用：扣一点点（0.02 量级），只影响同分附近的排序，
+    # 不会把明显更相关的图压下去。
+    if recent_by_label:
+        value -= pick.category_recent_penalty(
+            recent_by_label.get(memo.label, ()), memo.id, VECTOR_CATEGORY_PENALTY
+        )
+    # 标点先验：关键词/语义都没给出情绪时的一点方向
+    if expected_labels and memo.label in expected_labels:
+        value += VECTOR_PRIOR_BONUS
+    return value / total_weight
 
 
 class Dispatcher:
@@ -127,6 +194,9 @@ class Dispatcher:
         self._pending: set[asyncio.Task[None]] = set()
         self.stats = DeliveryStats()
         self._closed = False
+        # 最近成功发送的观测样本（面板「发送记录」）：内存环形队列即可，
+        # 重启清零可接受——它服务于调参，不是审计日志。
+        self._recent_sends: deque[dict] = deque(maxlen=20)
         # 21 个标签的向量：一次算好反复用，模型变了才重算
         self._label_vecs: dict[str, tuple[float, ...]] = {}
         self._label_model = ""
@@ -189,7 +259,12 @@ class Dispatcher:
             try:
                 persona_id = self._persona_resolver(umo) or None
             except Exception as exc:
-                self._log.debug("[MemeNest] 解析人格失败 type=%s", type(exc).__name__)
+                # 人格解析失败会让过滤退化成「只发通用」，属于不报错的错误行为：
+                # 用 WARNING 留下痕迹，别让它在 DEBUG 里消失。
+                self._log.warning(
+                    "[MemeNest] 解析人格失败，本回合按无人格处理 type=%s",
+                    type(exc).__name__,
+                )
         return persona_id, True
 
     # -- 闸与选片 ---------------------------------------------------------
@@ -236,7 +311,7 @@ class Dispatcher:
             return FireOutcome(decision.code, detail=decision.detail)
 
         persona_id, persona_filter = self._filters(umo)
-        memo, low_relevance = await self._choose(
+        memo, low_relevance, via = await self._choose(
             umo, text, context_text, persona_id, persona_filter
         )
         if memo is None:
@@ -253,9 +328,12 @@ class Dispatcher:
             return FireOutcome(Reason.NO_CANDIDATE)
 
         state.used = True
-        delay = max(0, settings.send_delay_seconds)
+        delay = gate.humanized_delay(settings.send_delay_seconds, text, self._roll())
         task = asyncio.get_running_loop().create_task(
-            self._deliver_later(umo, memo, delay, state), name="memenest-send"
+            self._deliver_later(
+                umo, memo, delay, state, trigger_text=text, via=via
+            ),
+            name="memenest-send",
         )
         state.task = task
         self._pending.add(task)
@@ -274,8 +352,8 @@ class Dispatcher:
         context_text: str,
         persona_id: str | None,
         persona_filter: bool,
-    ) -> tuple[Memo | None, bool]:
-        """候选查询走缓存（命中即零查库），打分仍是纯函数（I-8）。"""
+    ) -> tuple[Memo | None, bool, str]:
+        """返回 (候选, 是否「不够相关」, 走了哪条路：vector / keyword / "")。"""
         if self._cache is not None:
             pool = await self._cache.get(persona_id=persona_id)
         else:
@@ -291,14 +369,24 @@ class Dispatcher:
                 ),
             )
         if not pool:
-            return None, False
+            return None, False, ""
         recent = await asyncio.to_thread(self.store.recent_ids, 8)
+        recent_by_label = await asyncio.to_thread(self.store.recent_ids_by_label, 4)
+        expected = punctuation.expected_labels(text)
         picked, decided = await self._pick_by_vector(
-            pool, text, context_text, umo, recent, persona_id, persona_filter
+            pool,
+            text,
+            context_text,
+            umo,
+            recent,
+            persona_id,
+            persona_filter,
+            recent_by_label=recent_by_label,
+            expected_labels=expected,
         )
         if decided:
             # 向量路已经做出决定：picked 为 None 就是「相似度不够」，不是没候选
-            return picked, picked is None
+            return picked, picked is None, VIA_VECTOR
 
         min_score = float(getattr(self._settings(), "min_keyword_score", 0.0) or 0.0)
         context = pick.PickContext(
@@ -306,12 +394,15 @@ class Dispatcher:
             keywords=pick.extract_keywords(text),
             context_keywords=pick.extract_keywords(context_text),
             recent_ids=recent,
+            recent_by_label=recent_by_label,
+            expected_labels=frozenset(expected),
             rng=self._rng,
             persona_id=persona_id,
             persona_filter=persona_filter,
             min_score=min_score,
         )
-        return pick.pick_best(pool, context)
+        memo, below = pick.pick_best(pool, context)
+        return memo, below, VIA_KEYWORD
 
     async def fire_manual(self, *, umo: str | None, memo: Memo) -> FireOutcome:
         """工具入口的显式发送：只过总开关、会话策略、作用域与人格归属，不掷骰、不延迟。"""
@@ -335,6 +426,10 @@ class Dispatcher:
         ok = await self._deliver(umo, path)
         if not ok:
             return FireOutcome(Reason.SEND_FAILED)
+        # 工具发送也要进发送记录：面板问的是「最近发过什么」，漏掉工具那一路
+        # 会让人以为只有自动发送在用图。
+        self.stats.sent += 1
+        self._note_send(umo, memo, "", VIA_TOOL)
         await self._mark_used(umo, memo)
         return FireOutcome(Reason.OK, memo=memo)
 
@@ -375,8 +470,13 @@ class Dispatcher:
         self._prune(self._last_sent)
         try:
             await asyncio.to_thread(self.store.bump_usage, memo.id, int(now))
-        except Exception as exc:  # 统计失败不影响已发出的消息
-            self._log.debug("[MemeNest] 使用计数失败 type=%s", type(exc).__name__)
+        except Exception as exc:
+            # 用量没记上，淘汰算法就会优先删掉「刚发过」的图：降级但不能静默
+            self._log.warning(
+                "[MemeNest] 使用计数失败，淘汰会偏向这张 id=%s type=%s",
+                memo.id,
+                type(exc).__name__,
+            )
         (state if state is not None else self._state(umo)).used = True
 
     # -- 延迟下发 ---------------------------------------------------------
@@ -390,7 +490,9 @@ class Dispatcher:
             return None
         try:
             return factory()
-        except Exception:
+        except Exception as exc:
+            # 工厂就是 _resolve_embedder，异常意味着语义检索整条被关掉
+            self._log.warning("[MemeNest] 向量模型不可用 type=%s", type(exc).__name__)
             return None
 
     async def _label_hits(self, embedder: Any, query: tuple[float, ...] | None) -> set[str]:
@@ -450,7 +552,11 @@ class Dispatcher:
         try:
             raw = await self._label_llm(text)
         except Exception as exc:
-            self._log.debug("[MemeNest] 标签萃取失败 type=%s", type(exc).__name__)
+            # 情绪那一路静默得 0 分，本回合会退化成只按画面/话题打分的普通检索
+            self._log.warning(
+                "[MemeNest] 标签萃取失败，本回合情绪路按空处理 type=%s",
+                type(exc).__name__,
+            )
             return set()
         from ..domain import normalize_labels
 
@@ -476,6 +582,9 @@ class Dispatcher:
         recent: set[int] | list[int],
         persona_id: str | None,
         persona_filter: bool,
+        *,
+        recent_by_label: dict[str, tuple[int, ...]] | None = None,
+        expected_labels: set[str] | None = None,
     ) -> tuple[Memo | None, bool]:
         """返回 (选中的表情, 是否已由向量路径做出决定)。
 
@@ -488,8 +597,12 @@ class Dispatcher:
 
         try:
             vectors = await self._vectors.get(embedder.model, embedder.dim)
-        except Exception:
+        except Exception as exc:
             self.stats.vector_unavailable += 1
+            self._log.warning(
+                "[MemeNest] 向量索引读取失败，本回合回落关键词 type=%s",
+                type(exc).__name__,
+            )
             return None, False
         if not vectors:
             self.stats.vector_unavailable += 1
@@ -508,14 +621,8 @@ class Dispatcher:
         self._pending_context = context_text or text
 
         settings = self._settings()
-        # 权重是实测扫出来的固定值，不做成配置（见 config.WEIGHT_* 的注释）
-        w_text = WEIGHT_TEXT
-        w_caption = WEIGHT_CAPTION
-        w_scenes = WEIGHT_SCENES
-        w_label = WEIGHT_LABEL
-
         query_labels = (
-            await self._label_hits(embedder, context_query or query) if w_label else set()
+            await self._label_hits(embedder, context_query or query) if WEIGHT_LABEL else set()
         )
 
         scored: list[tuple[float, Memo]] = []
@@ -527,38 +634,17 @@ class Dispatcher:
                 continue
             if persona_filter and not pick.persona_allows(memo, persona_id):
                 continue
-            # 分母按「这条实际有哪几路」算：没有话题词的图（立绘、壁纸）不该
-            # 因为缺了一路就永久少 0.35，否则同分情况下它永远排在有词图的后面。
-            total_weight = 0.0
-            if w_text and kinds.get("text"):
-                total_weight += w_text
-            if w_caption and kinds.get("caption"):
-                total_weight += w_caption
-            if w_scenes and kinds.get("scene"):
-                total_weight += w_scenes
-            if w_label:
-                total_weight += w_label
-            if total_weight <= 0:
-                total_weight = 1.0
-            value = 0.0
-            if w_text:
-                value += w_text * emb.dot(query, kinds.get("text", ()))
-            if w_caption:
-                value += w_caption * emb.dot(query, kinds.get("caption", ()))
-            if w_scenes:
-                # 话题词没有说话人：机器人自己在聊这个话题、还是用户在聊，都该用这张图。
-                # 取两路较高的那个，避免同一句话两边都算成双倍权重。
-                # 注意别拿 0.0 兜底——余弦可能为负，垫个 0 等于给这一路偷偷加了个 ReLU，
-                # 和 text/caption 两路的口径就不一致了。
-                scene_vec = kinds.get("scene", ())
-                if scene_vec:
-                    sims = [emb.dot(query, scene_vec)]
-                    if context_query is not None:
-                        sims.append(emb.dot(context_query, scene_vec))
-                    value += w_scenes * max(sims)
-            if w_label:
-                value += w_label * self._label_pick(memo, query_labels)
-            scored.append((value / total_weight, memo))
+            value = score_vector_entry(
+                memo,
+                kinds,
+                query,
+                context_query,
+                label_bonus=self._label_pick(memo, query_labels),
+                recent_by_label=recent_by_label,
+                expected_labels=expected_labels,
+            )
+            if value is not None:
+                scored.append((value, memo))
         if not scored:
             self.stats.vector_unavailable += 1
             return None, False
@@ -625,7 +711,14 @@ class Dispatcher:
 
 
     async def _deliver_later(
-        self, umo: str, memo: Memo, delay: int, state: TurnState
+        self,
+        umo: str,
+        memo: Memo,
+        delay: float,
+        state: TurnState,
+        *,
+        trigger_text: str = "",
+        via: str = "",
     ) -> None:
         """state 必须是安排发送时的那个对象：delay=0 时 dict 里可能已经换了新回合。"""
         try:
@@ -648,7 +741,216 @@ class Dispatcher:
             self._log.debug("[MemeNest] 发送失败 reason=%s id=%s", Reason.SEND_FAILED, memo.id)
             return
         self.stats.sent += 1
+        self._note_send(umo, memo, trigger_text, via)
         await self._mark_used(umo, memo, state)
+
+    # -- 检索排序（工具路径复用同一套口径） --------------------------------
+
+    async def rank_pool(
+        self,
+        pool: list[Memo],
+        text: str,
+        context_text: str = "",
+    ) -> tuple[list[tuple[float, Memo]], str]:
+        """给候选排序，返回 ([(分数, memo)] 由高到低, 走了哪条路）。
+
+        工具检索与自动发送共用这份打分，避免「同一句话，模型搜到的和自动发的不是一张」。
+        向量可用时走向量（含标签命中、同类避让、标点先验），否则回落关键词。
+        """
+        if not pool:
+            return [], ""
+        recent = await asyncio.to_thread(self.store.recent_ids, 8)
+        recent_by_label = await asyncio.to_thread(self.store.recent_ids_by_label, 4)
+        expected = punctuation.expected_labels(text)
+
+        embedder = self._active_embedder()
+        if embedder is not None and self._vectors is not None:
+            try:
+                vectors = await self._vectors.get(embedder.model, embedder.dim)
+                query = await embedder.embed(text)
+            except Exception as exc:
+                self._log.warning(
+                    "[MemeNest] 工具检索的向量路失败，回落关键词 type=%s",
+                    type(exc).__name__,
+                )
+                vectors, query = None, None
+            if vectors and query is not None:
+                context_query = (
+                    await embedder.embed(context_text) if context_text.strip() else None
+                )
+                query_labels: set[str] = set()
+                if WEIGHT_LABEL and not self._use_llm_labels():
+                    try:
+                        query_labels = await self._label_hits(
+                            embedder, context_query or query
+                        )
+                    except Exception as exc:
+                        self._log.debug(
+                            "[MemeNest] 工具检索的标签命中失败 type=%s",
+                            type(exc).__name__,
+                        )
+                scored: list[tuple[float, Memo]] = []
+                for memo in pool:
+                    kinds = vectors.get(memo.id)
+                    if not kinds:
+                        continue
+                    value = score_vector_entry(
+                        memo,
+                        kinds,
+                        query,
+                        context_query,
+                        label_bonus=self._label_pick(memo, query_labels),
+                        recent_by_label=recent_by_label,
+                        expected_labels=expected,
+                    )
+                    if value is not None:
+                        scored.append((value, memo))
+                if scored:
+                    scored.sort(key=lambda item: -item[0])
+                    return scored, VIA_VECTOR
+
+        context = pick.PickContext(
+            umo=None,
+            keywords=pick.extract_keywords(text),
+            context_keywords=pick.extract_keywords(context_text),
+            recent_ids=recent,
+            recent_by_label=recent_by_label,
+            expected_labels=frozenset(expected),
+            rng=self._rng,
+        )
+        ranked = sorted(
+            ((score_memo(memo, context), memo) for memo in pool),
+            key=lambda item: -item[0],
+        )
+        return ranked, VIA_KEYWORD
+
+    # -- 发送观测（面板「发送记录」弹层的数据源） --------------------------
+
+    def _note_send(self, umo: str, memo: Memo, trigger_text: str, via: str) -> None:
+        self._recent_sends.append(
+            {
+                "time": int(self._clock()),
+                "umo": umo,
+                "memo_id": memo.id,
+                "label": memo.label,
+                "caption": memo.caption[:40],
+                "text": (trigger_text or "")[:60],
+                "via": via,
+            }
+        )
+
+    def recent_sends(self) -> list[dict]:
+        """最近的发送记录（新→旧，面板直接按顺序渲染）。"""
+        return list(reversed(self._recent_sends))
+
+    def reject_stats(self) -> dict[str, int]:
+        """拒发原因分布（含向量路自身的不够相关计数）。"""
+        data = dict(self.stats.rejected)
+        if self.stats.vector_rejects:
+            data["vector_below_threshold"] = self.stats.vector_rejects
+        return data
+
+    # -- 检索预览（面板「试一试」：两条路各自的 top 候选与原始分） --------
+
+    async def preview(self, text: str, context_text: str = "", *, limit: int = 5) -> dict:
+        """Dry-run 检索：不过闸、不记用量、不做多样性重排，只看原始分。
+
+        这是调参工具：换提示词、调权重、改阈值前后各跑一遍同一句话，
+        对比 top 候选的变化。作用域/人格过滤也不做——目的是看检索本身。
+        """
+        text = (text or "").strip()
+        if not text:
+            return {"keyword": [], "vector": None, "model": ""}
+        pool = await asyncio.to_thread(
+            self.store.candidates,
+            CandidateQuery(
+                state=STATE_READY,
+                umo=None,
+                ignore_scope=True,
+                limit=400,
+                persona_id=None,
+                persona_filter=False,
+            ),
+        )
+        if not pool:
+            return {"keyword": [], "vector": None, "model": ""}
+
+        def _entry(memo: Memo, score: float) -> dict:
+            return {
+                "id": memo.id,
+                "label": memo.label,
+                "caption": memo.caption[:40],
+                "text_in_image": (memo.text_in_img or "")[:30],
+                "score": round(float(score), 4),
+            }
+
+        # 关键词路：纯函数打分排序
+        recent = await asyncio.to_thread(self.store.recent_ids, 8)
+        recent_by_label = await asyncio.to_thread(self.store.recent_ids_by_label, 4)
+        expected = punctuation.expected_labels(text)
+        context = pick.PickContext(
+            umo=None,
+            keywords=pick.extract_keywords(text),
+            context_keywords=pick.extract_keywords(context_text),
+            recent_ids=recent,
+            recent_by_label=recent_by_label,
+            expected_labels=frozenset(expected),
+            rng=self._rng,
+        )
+        keyword_ranked = sorted(
+            ((score_memo(memo, context), memo) for memo in pool),
+            key=lambda item: -item[0],
+        )
+        keyword_top = [_entry(memo, score) for score, memo in keyword_ranked[:limit]]
+
+        # 向量路：与 _pick_by_vector 共用 score_vector_entry，且带上同样的先验与惩罚，
+        # 唯一差别是不做多样性重排（预览要看的是原始排序）。
+        vector_top: list[dict] | None = None
+        model = ""
+        embedder = self._active_embedder()
+        if embedder is not None and self._vectors is not None:
+            model = embedder.model
+            try:
+                vectors = await self._vectors.get(embedder.model, embedder.dim)
+                query = await embedder.embed(text)
+            except Exception as exc:
+                self._log.warning("[MemeNest] 预览向量路失败 type=%s", type(exc).__name__)
+                vectors, query = None, None
+            if vectors and query is not None:
+                context_query = (
+                    await embedder.embed(context_text) if context_text.strip() else None
+                )
+                # 标签命中：vector 模式走标签向量（算一次就缓存），llm 模式跳过——
+                # 预览不该为了一次调参额外花一次模型调用。
+                query_labels: set[str] = set()
+                if WEIGHT_LABEL and not self._use_llm_labels():
+                    try:
+                        query_labels = await self._label_hits(
+                            embedder, context_query or query
+                        )
+                    except Exception as exc:
+                        self._log.debug(
+                            "[MemeNest] 预览标签命中失败 type=%s", type(exc).__name__
+                        )
+                scored: list[tuple[float, Memo]] = []
+                for memo in pool:
+                    kinds = vectors.get(memo.id)
+                    if not kinds:
+                        continue
+                    value = score_vector_entry(
+                        memo,
+                        kinds,
+                        query,
+                        context_query,
+                        label_bonus=self._label_pick(memo, query_labels),
+                        recent_by_label=recent_by_label,
+                        expected_labels=expected,
+                    )
+                    if value is not None:
+                        scored.append((value, memo))
+                scored.sort(key=lambda item: -item[0])
+                vector_top = [_entry(memo, score) for score, memo in scored[:limit]]
+        return {"keyword": keyword_top, "vector": vector_top, "model": model}
 
     # -- 停机 -------------------------------------------------------------
 

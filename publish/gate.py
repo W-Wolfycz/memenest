@@ -67,6 +67,8 @@ def result_is_model_reply(result: Any) -> bool:
             if checker():
                 return True
         except Exception:
+            # 宿主提供的判定不可用就退到下面按内容类型判断：这一步是探测，
+            # 失败不等于「不是模型回复」，不能据此直接拒绝。
             pass
     kind = getattr(getattr(result, "result_content_type", None), "name", "")
     return kind in _MODEL_RESULT_KINDS
@@ -139,6 +141,24 @@ def is_command_text(text: str, markers: tuple[str, ...] = DEFAULT_COMMAND_MARKER
     if not stripped:
         return False
     return any(stripped.startswith(marker) for marker in markers if marker)
+
+
+# 发送延迟拟人化：固定 5 秒在群里看久了能被感觉到是机器人。
+# 实际延迟 = 基础值 × 抖动系数 + 文本长度因子（长回复像"打了更多字"）。
+DELAY_JITTER_LOW = 0.75
+DELAY_JITTER_HIGH = 1.25
+DELAY_PER_CHARS = 30.0  # 每这么多可见字符多等一秒
+DELAY_TEXT_CAP = 2.0  # 文本因子的上限（秒）
+
+
+def humanized_delay(base_seconds: float, text: str, roll: float) -> float:
+    """围绕配置值抖动的发送延迟；base 为 0 表示用户要立即发，保持 0。"""
+    base = max(0.0, float(base_seconds))
+    if base <= 0:
+        return 0.0
+    jitter = DELAY_JITTER_LOW + (DELAY_JITTER_HIGH - DELAY_JITTER_LOW) * min(1.0, max(0.0, roll))
+    text_extra = min(DELAY_TEXT_CAP, visible_length(text) / DELAY_PER_CHARS)
+    return base * jitter + text_extra
 
 
 def evaluate(gate: GateInput) -> GateDecision:

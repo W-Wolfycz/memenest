@@ -32,7 +32,7 @@ from ..domain import (
 )
 from ..store import MemoStore, StoreError
 from . import dedup
-from .analyze import LLMCall, analyze_detailed
+from .analyze import LLMCall, analyze_with_retry
 from .fetch import FetchLimits, fetch_media
 
 
@@ -60,6 +60,12 @@ class IngestCounters:
     failed: int = 0
     rejected: int = 0
     dropped_full: int = 0
+    no_model: int = 0
+    """模型不可用而按裸条目入库的条数：这是「识图其实没生效」的唯一可见痕迹。"""
+
+
+def _day_of(timestamp: float) -> str:
+    return time.strftime("%Y-%m-%d", time.localtime(timestamp))
 
 
 def safe_rel_path(rel_path: str) -> bool:
@@ -98,6 +104,33 @@ class IngestPipeline:
         # 「同时处理几张图」的真实上限。没有它的话两条路径各跑各的，
         # 实际并发是 2×worker_count，识图 API 会被双倍打。
         self._slots: asyncio.Semaphore | None = None
+        # 每日识图预算（按本地日期翻页）：管的是「真调视觉模型」的次数，
+        # 内存计数即可——重启丢当日进度，换来的是不引入持久化状态。
+        self._vision_day = _day_of(self._clock())
+        self._vision_calls = 0
+        # 「没有视觉模型」的 WARNING 每次启动只喊一次，避免每张图刷屏
+        self._warned_no_model = False
+
+    def vision_usage(self) -> tuple[str, int]:
+        """(当天日期, 今日识图次数)；跨天时自动翻页归零。"""
+        today = _day_of(self._clock())
+        if today != self._vision_day:
+            self._vision_day = today
+            self._vision_calls = 0
+        return today, self._vision_calls
+
+    def vision_budget_left(self) -> bool:
+        """预算是否还有余量；daily_vision_budget<=0 表示不限。"""
+        limit = int(getattr(self._settings(), "daily_vision_budget", 0) or 0)
+        if limit <= 0:
+            return True
+        _day, used = self.vision_usage()
+        return used < limit
+
+    def note_vision_call(self) -> None:
+        """一次真实的视觉模型调用（含失败——失败同样花了钱）。"""
+        self.vision_usage()  # 先翻页再计数
+        self._vision_calls += 1
 
     # -- 生命周期 ---------------------------------------------------------
 
@@ -304,14 +337,32 @@ class IngestPipeline:
         call = self._llm_call()
         if call is None:
             # F2.5：分类能力不可用时收集照常，但只能进审核池并落在兜底类。
-            self._log.debug("[MemeNest] 视觉模型不可用，按审核池裸条目入库")
+            self.counters.no_model += 1
+            if not self._warned_no_model:
+                # 升到 WARNING 且只喊一次：这条退化只表现为「所有新图都没有描述」，
+                # 曾经只记 DEBUG，结果部署端静静攒了几百条无描述条目没人发现。
+                self._warned_no_model = True
+                self._log.warning(
+                    "[MemeNest] 没有可用的视觉模型，新收条目只按兜底类入库（后续同类不再提示，"
+                    "面板「缺模型」计数会继续累加）"
+                )
             return Analysis(label=FALLBACK_LABEL), False
-        outcome = await analyze_detailed(
-            path,
-            prompt=self._prompt,
-            llm_call=call,
-            work_dir=self.tmp_dir,
-        )
+        if not self.vision_budget_left():
+            # 预算耗尽等同于「模型今天不可用」：收进审核池做裸条目，
+            # 明天预算翻页后照常打标（点「补齐」不会补打标，重跑识别即可）。
+            self._log.info("[MemeNest] 今日识图预算已用完，按审核池裸条目入库")
+            return Analysis(label=FALLBACK_LABEL), False
+        try:
+            outcome = await analyze_with_retry(
+                path,
+                prompt=self._prompt,
+                llm_call=call,
+                work_dir=self.tmp_dir,
+                can_attempt=self.vision_budget_left,
+                on_attempt=self.note_vision_call,
+            )
+        except asyncio.CancelledError:
+            raise
         if outcome.analysis is None:
             # 一次调用不重试：失败就是这张图没入库，让用户能在日志里看到原因
             self._log.info("[MemeNest] 分类失败 reason=%s（不入库）", outcome.reason)
@@ -390,7 +441,13 @@ class IngestPipeline:
             return
         try:
             embedder = factory()
-        except Exception:
+        except Exception as exc:
+            # 拿不到 embedder → 这张图入库后永远没有向量，只能等重建：必须留痕
+            self._log.warning(
+                "[MemeNest] 向量模型初始化失败，id=%s 暂无向量 type=%s",
+                memo_id,
+                type(exc).__name__,
+            )
             return
         if embedder is None:
             return

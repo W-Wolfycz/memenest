@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import re
 from dataclasses import dataclass
 from io import BytesIO
@@ -23,6 +24,8 @@ from .domain import (
     label_display,
 )
 from .publish.gate import session_key
+
+logger = logging.getLogger(__name__)
 
 MAX_BATCH_IDS = 50
 MAX_TERM_COUNT = 12
@@ -138,6 +141,33 @@ def import_params(
 
 
 UPLOAD_JOB_RE = re.compile(r"[0-9a-f]{32}")
+
+MANIFEST_MAX_ITEMS = 200
+"""一次清单导入最多入队多少条：再多就该拆批，免得把队列和识图额度一次打满。"""
+
+
+def manifest_urls(data: Any) -> list[str]:
+    """从清单 JSON 里抽图片 URL。
+
+    接受的形状：字符串数组，或 `{"items": [...]}`；每一项可以是 URL 字符串，
+    也可以是 `{"url": "..."}`。其它字段一律忽略，坏项跳过而不是整份失败。
+    """
+    items = data.get("items") if isinstance(data, dict) else data
+    if not isinstance(items, (list, tuple)):
+        return []
+    urls: list[str] = []
+    for item in items:
+        if isinstance(item, str):
+            url = item.strip()
+        elif isinstance(item, dict):
+            url = str(item.get("url") or "").strip()
+        else:
+            continue
+        if url and url not in urls:
+            urls.append(url)
+        if len(urls) >= MANIFEST_MAX_ITEMS:
+            break
+    return urls
 
 
 def _persona_list(value: Any) -> list[str]:
@@ -285,7 +315,9 @@ def thumb_bytes(source: Path, max_side: int = THUMB_MAX_SIDE) -> bytes | None:
             buffer = BytesIO()
             canvas.save(buffer, format="JPEG", quality=THUMB_QUALITY, optimize=True)
             return buffer.getvalue()
-    except Exception:
+    except Exception as exc:
+        # 坏图/超限：面板显示「无缩略图」占位，这里留痕说明是哪类失败
+        logger.debug("生成缩略图失败 type=%s", type(exc).__name__)
         return None
 
 
@@ -327,14 +359,16 @@ def preview_bytes(source: Path, max_side: int = PREVIEW_MAX_SIDE) -> tuple[bytes
                 # 只对 JPEG 有效；PNG/WebP 的 draft 是空操作，靠下面的统一缩放兜底
                 try:
                     image.draft("RGB", (max_side, max_side))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # draft 只是省解码开销的优化，失败不影响结果，但要能查到
+                    logger.debug("draft 缩放失败 type=%s", type(exc).__name__)
             canvas = _flatten_to_rgb(image)
             canvas.thumbnail((max_side, max_side), Image.LANCZOS)
             buffer = BytesIO()
             canvas.save(buffer, format="JPEG", quality=88, optimize=True)
             return buffer.getvalue(), "image/jpeg"
-    except Exception:
+    except Exception as exc:
+        logger.debug("生成预览图失败 type=%s", type(exc).__name__)
         return None
 
 

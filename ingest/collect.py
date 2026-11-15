@@ -6,12 +6,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..domain import MediaRef
 from .throttle import Throttle
+
+logger = logging.getLogger(__name__)
 
 MAX_REFS = 4
 
@@ -60,7 +63,8 @@ def _platform_name(event: Any) -> str:
     if callable(getter):
         try:
             return str(getter() or "")
-        except Exception:
+        except Exception as exc:
+            logger.debug("读取平台名失败 type=%s", type(exc).__name__)
             return ""
     meta = getattr(event, "platform_meta", None)
     return str(getattr(meta, "name", "") or "")
@@ -111,7 +115,9 @@ def image_components(event: Any) -> list[Any]:
         return []
     try:
         chain = getter() or []
-    except Exception:
+    except Exception as exc:
+        # 取不到消息链 = 这条消息当没图，会表现为「突然一条也不收了」
+        logger.warning("读取消息链失败，本条按无图处理 type=%s", type(exc).__name__)
         return []
     result = []
     for comp in chain:
@@ -135,7 +141,9 @@ def quoted_image_sources(event: Any) -> list[str]:
         return []
     try:
         chain = getter() or []
-    except Exception:
+    except Exception as exc:
+        # grab / mute 依赖这条链路：取不到就等于「引用的图丢了」，要能查
+        logger.warning("读取引用消息链失败 type=%s", type(exc).__name__)
         return []
 
     found: list[str] = []
@@ -315,6 +323,8 @@ def collect_refs(
 COLLECT = "collect"
 SKIP_DISABLED = "skip_disabled"
 SKIP_NO_MEDIA = "skip_no_media"
+SKIP_INBOX_FULL = "skip_inbox_full"
+SKIP_BUDGET = "skip_budget"
 SKIP_THROTTLED = "skip_throttled"
 
 
@@ -334,16 +344,24 @@ def plan_collect(
     has_refs: bool,
     throttle: Throttle,
     now: float,
+    inbox_full: bool = False,
+    budget_exhausted: bool = False,
 ) -> CollectPlan:
-    """收集决策的唯一入口：开关 → 有无合格媒体 → 节流。
+    """收集决策的唯一入口：开关 → 有无合格媒体 → 审核池/预算 → 节流。
 
     关键顺序：判定不合格的媒体（普通照片）绝不能消耗节流窗口，
-    所以 `has_refs` 的判断必须排在 `throttle.allows()` 之前。
+    所以 `has_refs` 的判断必须排在 `inbox_full` / `budget_exhausted` 与
+    `throttle.allows()` 之前。池满、预算尽也要在节流之前退出——
+    这种时候掷骰子只会白耗冷却窗口。
     """
     if not enabled:
         return CollectPlan(SKIP_DISABLED, "collect_disabled")
     if not has_refs:
         return CollectPlan(SKIP_NO_MEDIA, "no_media")
+    if inbox_full:
+        return CollectPlan(SKIP_INBOX_FULL, "inbox_full")
+    if budget_exhausted:
+        return CollectPlan(SKIP_BUDGET, "budget_exhausted")
     allowed, reason = throttle.allows(now)
     if not allowed:
         return CollectPlan(SKIP_THROTTLED, reason)

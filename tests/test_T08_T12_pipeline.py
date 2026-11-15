@@ -13,7 +13,7 @@ import pytest
 from PIL import Image
 
 from memenest.config import Settings
-from memenest.domain import MediaRef
+from memenest.domain import MediaRef, PageQuery
 from memenest.ingest.pipeline import IngestContext, IngestPipeline, safe_rel_path
 from memenest.store import MemoStore, StoreError
 
@@ -60,6 +60,70 @@ def _files_under(root) -> list[str]:
     if not root.exists():
         return []
     return [path.name for path in root.rglob("*") if path.is_file()]
+
+
+@pytest.mark.asyncio
+async def test_missing_model_is_counted_not_silent(tmp_path):
+    """没有视觉模型时条目照样入库，但必须留下「缺模型」计数。
+
+    这条退化在界面上只表现为「所有新图都没有描述」：日志曾经只有 DEBUG，
+    部署端就这样静默攒了几百条无描述条目。计数是它唯一的可见痕迹。
+    """
+    pipeline, store, data_dir = _build(tmp_path, _settings(), None)
+    await pipeline.start()
+    try:
+        for index, color in enumerate(((40, 120, 200), (200, 40, 90))):
+            source = tmp_path / f"nomodel{index}.png"
+            _write_png(source, color)
+            await pipeline.process_one(
+                _ref(source), IngestContext(umo=UMO, origin_kind="chat", scope="any")
+            )
+        assert pipeline.counters.no_model == 2, "无模型入库必须计数"
+        rows, _total = store.page(PageQuery())
+        assert len(rows) == 2, "模型不可用不该挡住收集"
+        for memo in rows:
+            assert memo.label == "other" and not memo.caption
+    finally:
+        await pipeline.stop()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_vision_budget_caps_model_calls_per_day(tmp_path):
+    """每日识图预算：第一条真调模型，第二条起按裸条目进审核池。
+
+    预算写坏的两个方向都静默：永不生效 = 刷图天费用照爆；提前生效 = 永远不识图。
+    """
+    calls: list[int] = []
+
+    async def llm(prompt: str, images: list[str]) -> str:
+        calls.append(1)
+        return '{"label": "laugh", "caption": "笑"}'
+
+    settings = _settings(daily_vision_budget=1)
+    pipeline, store, data_dir = _build(tmp_path, settings, llm)
+    await pipeline.start()
+    try:
+        source = tmp_path / "one.png"
+        _write_png(source)
+        first = await pipeline.process_one(
+            _ref(source), IngestContext(umo=UMO, origin_kind="chat", scope="any")
+        )
+        second_src = tmp_path / "two.png"
+        _write_png(second_src, (200, 40, 90))
+        second = await pipeline.process_one(
+            _ref(second_src), IngestContext(umo=UMO, origin_kind="chat", scope="any")
+        )
+        assert calls, "前置条件：第一条要真调模型"
+        assert first["outcome"] == "stored"
+        assert len(calls) == 1, "预算用尽后不得再调模型"
+        assert second["outcome"] == "stored"
+        # 预算耗尽的条目按「模型不可用」路径处理：裸条目进审核池
+        assert pipeline.vision_usage()[1] == 1
+        assert pipeline.vision_budget_left() is False
+    finally:
+        await pipeline.stop()
+        store.close()
 @pytest.mark.asyncio
 async def test_T08_model_failure_leaves_no_row_and_no_file(tmp_path):
     """模型失败（这里用抛异常代表）不留行、不留文件。

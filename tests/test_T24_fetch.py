@@ -104,3 +104,34 @@ async def test_extension_follows_real_content_not_url(tmp_path, monkeypatch):
     assert result.media.ext == ".png"
     assert result.media.path.parent == tmp_path
     assert result.media.path.is_file()
+
+
+@pytest.mark.asyncio
+async def test_animated_media_gets_composite_percept_hash(tmp_path):
+    """动图用三帧复合指纹，不再只拿首帧。
+
+    只比首帧会把「首帧相同、后续不同」的动画判成同一张，新表情被静默丢掉；
+    复合指纹要求三帧都在阈值内才判重。这里验证动图路径产出带分隔的复合值。
+    """
+
+    def stripes(offset: int) -> Image.Image:
+        """黑白条纹：GIF 量化后亮暗差仍在，能保证首帧算得出非空指纹。"""
+        image = Image.new("L", (32, 32))
+        pixels = image.load()
+        for x in range(32):
+            for y in range(32):
+                pixels[x, y] = 255 if ((x + offset) // 4) % 2 else 0
+        return image.convert("RGB")
+
+    frames = [stripes(0), stripes(4)]
+    source = tmp_path / "anim.gif"
+    frames[0].save(source, save_all=True, append_images=frames[1:], duration=100, loop=0)
+    result = await fetch.fetch_media(
+        _ref(str(source), ".gif"), fetch.FetchLimits(), tmp_path / "tmp"
+    )
+    assert result.ok is True
+    assert result.media is not None
+    assert result.media.is_animated is True
+    parts = result.media.percept_hash.split(":")
+    assert len(parts) == 3, "复合指纹必须是三段"
+    assert all(part and int(part, 16) >= 0 for part in parts)

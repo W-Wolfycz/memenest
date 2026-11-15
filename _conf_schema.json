@@ -97,6 +97,18 @@
         "type": "int",
         "default": 800,
         "hint": "最多存多少张。满了先删用得最少的，收藏和导入的不删。"
+      },
+      "inbox_cap": {
+        "description": "待审核池上限",
+        "type": "int",
+        "default": 200,
+        "hint": "待审核堆到这么多张就暂停自动收集（`/memenest grab` 与面板导入照常）。填 0 不限。"
+      },
+      "daily_vision_budget": {
+        "description": "每日识图预算",
+        "type": "int",
+        "default": 0,
+        "hint": "每天最多调多少次视觉模型（失败的调用也计数）。超了之后新收的图按裸条目进审核池，明天自动恢复。填 0 不限。"
       }
     }
   },

@@ -21,10 +21,20 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PLUGIN_PY = ROOT / "panel.py"
-APP_JS = ROOT / "pages" / "manager" / "app.js"
+PAGE_JS = sorted(path for path in (ROOT / "pages").glob("*/*.js"))
+"""页面目录下的每份脚本都要查：一个页面里可以有 app.js + overview.js，
+只查 app.js 会让新脚本的前端调用被当成「闲置路由」或根本不检查。"""
 DEFAULT_PLUGIN_DIR = pathlib.Path(
     r"C:\Users\Administrator\.astrbot\data\plugins\memenest"
 )
+
+
+def page_sources() -> list[tuple[str, str]]:
+    return [
+        (path.relative_to(ROOT / "pages").as_posix(), path.read_text(encoding="utf-8"))
+        for path in PAGE_JS
+        if path.is_file()
+    ]
 
 results: list[tuple[bool, str, str]] = []
 
@@ -108,12 +118,15 @@ def parse_contract() -> tuple[dict[str, str], dict[str, set[str]], list[tuple[in
         if keys:
             body_keys[func.name] = keys
 
-    js = APP_JS.read_text(encoding="utf-8")
-    calls: list[tuple[int, str, str]] = []
-    for match in re.finditer(
-        r"\b(api\.get|api\.post|bridge\.upload|bridge\.download)\(\s*[\"'`]([^\"'`$]+)", js
-    ):
-        calls.append((js[: match.start()].count("\n") + 1, match.group(1), match.group(2)))
+    calls: list[tuple[str, int, str, str]] = []
+    for page, js in page_sources():
+        for match in re.finditer(
+            r"\b(api\.get|api\.post|bridge\.upload|bridge\.download)\(\s*[\"'`]([^\"'`$]+)",
+            js,
+        ):
+            calls.append(
+                (page, js[: match.start()].count("\n") + 1, match.group(1), match.group(2))
+            )
     return routes, body_keys, calls, methods  # type: ignore[return-value]
 
 
@@ -127,10 +140,14 @@ def check_routes() -> None:
     unrouted = sorted(handled - set(routes.values()))
     record(not unrouted, "handler 都挂了路由", str(unrouted) if unrouted else "无孤儿方法")
 
-    missing = [f"{line}: {kind}('{ep}')" for line, kind, ep in calls if ep not in routes]
+    missing = [
+        f"{page}:{line}: {kind}('{ep}')"
+        for page, line, kind, ep in calls
+        if ep not in routes
+    ]
     record(not missing, "前端调用都有路由", "; ".join(missing) if missing else f"{len(calls)} 处调用")
 
-    touched = {ep for _, _, ep in calls}
+    touched = {ep for _, _, _, ep in calls}
     idle = sorted(set(routes) - touched)
     record(not idle, "没有闲置路由", str(idle) if idle else "每个路由都被前端使用")
 
@@ -165,16 +182,17 @@ def _extract_object_keys(js: str, open_index: int) -> tuple[set[str], bool]:
 
 def check_params() -> None:
     routes, body_keys, calls, _ = parse_contract()
-    js = APP_JS.read_text(encoding="utf-8")
+    sources = dict(page_sources())
     problems = []
     skipped = []
 
-    for line, kind, endpoint in calls:
+    for page, _line, kind, endpoint in calls:
         if kind == "api.get" or endpoint not in routes:
             continue
         expected = body_keys.get(routes[endpoint], set())
         if not expected:
             continue
+        js = sources.get(page, "")
 
         # 找到这次调用的实参起点
         pattern = re.compile(
@@ -194,7 +212,9 @@ def check_params() -> None:
 
         # 后端也可能经由 core.import_params 间接读，交集为空才算问题
         if not (sent & expected):
-            problems.append(f"{endpoint}: 发 {sorted(sent) or '[]'} 收 {sorted(expected)}")
+            problems.append(
+                f"{page}:{endpoint}: 发 {sorted(sent) or '[]'} 收 {sorted(expected)}"
+            )
 
     detail = "; ".join(problems)
     if skipped:
@@ -321,8 +341,13 @@ def check_js() -> None:
     if not node.is_file():
         record(True, "app.js 语法", "跳过（没有 node）")
         return
-    proc = _run([str(node), "--check", str(APP_JS)])
-    record(proc.returncode == 0, "app.js 语法", (proc.stderr or "").strip()[:160] or "OK")
+    bad: list[str] = []
+    for path in PAGE_JS:
+        proc = _run([str(node), "--check", str(path)])
+        if proc.returncode != 0:
+            bad.append(f"{path.parent.name}: {(proc.stderr or '').strip()[:120]}")
+    detail = "; ".join(bad) if bad else f"{len(PAGE_JS)} 个页面 OK"
+    record(not bad, "app.js 语法", detail)
 
 
 # ------------------------------------------------------- 9. 部署一致性

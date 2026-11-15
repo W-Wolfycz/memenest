@@ -8,10 +8,13 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from ..domain import (
     GENERIC_PERSONA,
@@ -30,11 +33,17 @@ from ..domain import (
     Stats,
 )
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 PERCEPT_SCAN_LIMIT = 2000
 MAX_PAGE_SIZE = 50
 MAX_CANDIDATES = 2000
-MAX_PURGE = 500
+
+_NEW_COLUMNS: dict[int, dict[str, dict[str, str]]] = {
+    # 版本 → 表 → {列: 类型}。加列走这里，`_ensure_column` 会先查 PRAGMA 再 ALTER，
+    # 已经存在的列不会被重复添加；建表用 schema.sql 的 IF NOT EXISTS 即可。
+    # v2：人格禁用名单改成独立表，没有新增列。
+}
+"""老库升级时要补的列。保持为空是正常的，加列时才往里登记。"""
 
 
 class StoreError(RuntimeError):
@@ -66,10 +75,13 @@ class MemoStore:
         return conn
 
     def initialize(self) -> None:
-        """建库建表。幂等，插件每次启动调用一次。
+        """建库建表并把老库升到当前结构版本。幂等，插件每次启动调用一次。
 
-        结构版本对不上时明确报错，不做静默迁移：这个插件还在 0.1.0 阶段，
-        不存在需要兼容的旧库，让用户删掉数据目录重来比带着半旧结构跑更安全。
+        版本策略（替代早期「对不上就报错要求删库」的做法）：
+        - 老库（版本更小）→ 逐级补结构（只加表/加列，不动已有数据）；
+        - 新库或版本一致 → 什么都不做，只补写版本号；
+        - 版本比插件更新 → 报错，禁止降级跑未知结构。
+        删库重建会丢掉用户攒的表情，只有「结构确实不兼容」才值得这么做。
         """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         ddl = self.schema_path.read_text(encoding="utf-8")
@@ -79,14 +91,26 @@ class MemoStore:
                 # 先跑建表脚本（都是 IF NOT EXISTS，对已存在的库无副作用），
                 # 之后 meta 一定存在，才查得到结构版本。
                 conn.executescript(ddl)
-                stored = conn.execute(
+                row = conn.execute(
                     "SELECT value FROM meta WHERE key = 'schema_version'"
                 ).fetchone()
-                if stored is not None and str(stored["value"]) != SCHEMA_VERSION:
+                current = int(SCHEMA_VERSION)
+                if row is None:
+                    stored = current  # 全新库：建表脚本已经是目标结构
+                else:
+                    try:
+                        stored = int(str(row["value"]).strip())
+                    except (TypeError, ValueError) as exc:
+                        raise StoreError(
+                            f"数据库结构版本无法识别：{row['value']!r}"
+                        ) from exc
+                if stored > current:
                     raise StoreError(
-                        f"数据库结构版本 {stored['value']} 与插件要求的 {SCHEMA_VERSION} 不一致，"
-                        f"请删除 {self.db_path.parent} 后重新收集"
+                        f"数据库结构版本 {stored} 比插件支持的 {current} 新，"
+                        f"请升级插件（而不是删除 {self.db_path.parent} 重建）"
                     )
+                if stored < current:
+                    self._migrate(conn, stored, current)
                 conn.execute(
                     "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
                     "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -95,6 +119,19 @@ class MemoStore:
         except sqlite3.Error as exc:
             raise StoreError(f"初始化数据库失败: {exc}") from exc
         self._initialized = True
+
+    def _migrate(self, conn: sqlite3.Connection, from_version: int, to_version: int) -> None:
+        """逐级升级结构：每一级只做「能安全补上」的变更。
+
+        目前 v1 → v2 只是把人格禁用名单独立成表（schema.sql 里已用
+        `CREATE TABLE IF NOT EXISTS` 覆盖），所以这一级没有额外 DDL。
+        以后要加列，在 `_NEW_COLUMNS` 里登记，`_ensure_column` 会按需补。
+        """
+        for version in range(from_version + 1, to_version + 1):
+            for table, columns in _NEW_COLUMNS.get(version, {}).items():
+                for column, ddl in columns.items():
+                    _ensure_column(conn, table, column, ddl)
+            logger.info("数据库结构已升级 v%s → v%s", from_version, version)
 
     def close(self) -> None:
         """连接按操作创建，这里只需要把 WAL 落一次盘。"""
@@ -202,6 +239,38 @@ class MemoStore:
                 (limit,),
             ).fetchall()
         return [(int(row["id"]), str(row["percept_hash"])) for row in rows]
+
+    def memos_missing_percept(
+        self, limit: int = 40, after_id: int = 0
+    ) -> list[tuple[int, str]]:
+        """感知指纹为空的条目（id, rel_path），按入库顺序取。
+
+        这类条目在近似去重里等于不存在：不补就永远只能靠字节哈希判重。
+
+        `after_id` 是游标：调用方必须把上一批的最后一条 id 传回来。只按 `LIMIT`
+        从头取的话，头部如果有补不出来的条目（文件缺失、算不出梯度），它们会一直
+        占住窗口，后面的条目永远扫不到——补一次和补一百次结果一样。
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, rel_path FROM memo "
+                "WHERE (percept_hash IS NULL OR percept_hash = '') AND id > ? "
+                "ORDER BY id LIMIT ?",
+                (max(0, int(after_id)), max(1, limit)),
+            ).fetchall()
+        return [(int(row["id"]), str(row["rel_path"])) for row in rows]
+
+    def set_percept_hashes(self, rows: list[tuple[int, str]]) -> int:
+        """批量写指纹；一次连接、一次 epoch 推进，返回写入条数。"""
+        if not rows:
+            return 0
+        with self._connect() as conn:
+            conn.executemany(
+                "UPDATE memo SET percept_hash = ? WHERE id = ?",
+                [(value, memo_id) for memo_id, value in rows],
+            )
+        self._touch()
+        return len(rows)
 
     # -- 写入 -------------------------------------------------------------
 
@@ -771,6 +840,113 @@ class MemoStore:
             ).fetchall()
         return tuple(int(row["id"]) for row in rows)
 
+    def recent_ids_by_label(
+        self, per_label: int = 4, scan_limit: int = 400
+    ) -> dict[str, tuple[int, ...]]:
+        """每个主分类最近用过的几张（新→旧）。
+
+        只按全局最近使用避让时，同一情绪的连续回复会被迫换到别的分类去，
+        所以再按分类各记一小份，打分时只压「刚用过的同类」，不影响别的类。
+
+        `scan_limit` 是窗口：挑图时每条消息都会调一次，不值得为「很久以前用过」
+        的记录做全表扫描——近 400 条已覆盖任何一个分类的最近 4 张。
+        """
+        keep = max(1, per_label)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, label FROM memo WHERE used_at > 0 "
+                "ORDER BY used_at DESC LIMIT ?",
+                (max(keep, int(scan_limit)),),
+            ).fetchall()
+        buckets: dict[str, list[int]] = {}
+        for row in rows:
+            label = str(row["label"])
+            bucket = buckets.setdefault(label, [])
+            if len(bucket) < keep:
+                bucket.append(int(row["id"]))
+        return {label: tuple(ids) for label, ids in buckets.items()}
+
+    def count_state(self, state: str) -> int:
+        """某个状态下的条数（待审核池护栏用，走索引，不做全表装配）。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM memo WHERE state = ?", (state,)
+            ).fetchone()
+        return int(row["n"])
+
+    def ids_without_description(self, limit: int = 0) -> list[int]:
+        """描述为空的条目 id（识图失效期间以兜底类入库的那批）。
+
+        「没有描述」= caption 与 text_in_img 都为空：这类条目在面板上看不到内容，
+        检索也匹配不到，只能靠重新识图救回来。
+        """
+        sql = (
+            "SELECT id FROM memo "
+            "WHERE COALESCE(TRIM(caption), '') = '' AND COALESCE(TRIM(text_in_img), '') = '' "
+            "ORDER BY id"
+        )
+        params: tuple[Any, ...] = ()
+        if limit and limit > 0:
+            sql += " LIMIT ?"
+            params = (int(limit),)
+        with self._connect() as conn:
+            return [int(row["id"]) for row in conn.execute(sql, params).fetchall()]
+
+    def count_without_description(self) -> int:
+        """描述为空的条目数（面板大盘的红黄条用，不取全量 id）。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM memo "
+                "WHERE COALESCE(TRIM(caption), '') = '' "
+                "AND COALESCE(TRIM(text_in_img), '') = ''"
+            ).fetchone()
+        return int(row["n"])
+
+    def rel_paths(self) -> list[tuple[int, str]]:
+        """全部条目的 (id, rel_path)：完整性体检用它和磁盘对账。"""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT id, rel_path FROM memo ORDER BY id").fetchall()
+        return [(int(row["id"]), str(row["rel_path"])) for row in rows]
+
+    def rel_paths_for(self, memo_ids: list[int]) -> list[str]:
+        """给定 id 列表取相对路径（保持传入顺序；不存在的 id 直接跳过）。"""
+        wanted = [int(item) for item in memo_ids]
+        if not wanted:
+            return []
+        found: dict[int, str] = {}
+        with self._connect() as conn:
+            for start in range(0, len(wanted), 200):
+                chunk = wanted[start : start + 200]
+                marks = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT id, rel_path FROM memo WHERE id IN ({marks})", chunk
+                ).fetchall()
+                for row in rows:
+                    found[int(row["id"])] = str(row["rel_path"])
+        return [found[item] for item in wanted if item in found]
+
+    def origin_stats(self, limit: int = 10) -> list[dict]:
+        """贡献最多的来源会话（面板「库况」用）；origin 为空的归成「导入」。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT origin_umo, COUNT(*) AS n FROM memo "
+                "WHERE origin_umo IS NOT NULL AND origin_umo <> '' "
+                "GROUP BY origin_umo ORDER BY n DESC LIMIT ?",
+                (max(1, limit),),
+            ).fetchall()
+            imported = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS n FROM memo "
+                    "WHERE origin_umo IS NULL OR origin_umo = ''"
+                ).fetchone()["n"]
+            )
+        result = [
+            {"origin": str(row["origin_umo"]), "count": int(row["n"])} for row in rows
+        ]
+        if imported:
+            result.append({"origin": "", "count": imported})
+        return result
+
     def stats(self) -> Stats:
         with self._connect() as conn:
             total = int(conn.execute("SELECT COUNT(*) AS n FROM memo").fetchone()["n"])
@@ -894,6 +1070,13 @@ def _unique(items: list[str]) -> list[str]:
 
 def _clip(text: str, limit: int) -> str:
     return str(text or "")[:limit]
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    """缺列才补（SQLite 的 ALTER 只能加列，且重复加会报错）。"""
+    existing = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 __all__ = [

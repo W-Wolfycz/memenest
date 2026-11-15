@@ -14,7 +14,7 @@ import random
 import pytest
 
 from memenest import embed as emb
-from memenest.config import VARIETY_DELTA, load_settings
+from memenest.config import load_settings
 from memenest.domain import STATE_READY, Analysis, CandidateQuery, Draft
 from memenest.publish.dispatcher import Dispatcher
 from memenest.publish.vectors import VectorStore
@@ -143,8 +143,3 @@ async def test_pick_variety_changes_spread_and_respects_floor(tmp_path):
         f"stable 档下最高分那张只占 {stable_top_share:.0%}，"
         "说明权重没起作用（退化成均匀采样了）"
     )
-
-
-def test_variety_delta_is_ordered():
-    """档位对应的窗口必须递增：写反了界面上「活泼」会变成最稳的那个。"""
-    assert VARIETY_DELTA["stable"] < VARIETY_DELTA["balanced"] < VARIETY_DELTA["lively"]

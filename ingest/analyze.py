@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from ..domain import (
     LABEL_KEYS,
@@ -239,6 +242,8 @@ async def analyze_detailed(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            # 模型调用失败与插件自身 bug 走同一个分支：WARNING 里必须带异常类型才能分辨
+            logger.warning("视觉模型调用失败 type=%s", type(exc).__name__)
             return AnalyzeOutcome(None, f"model_error_{type(exc).__name__}")
         if not isinstance(raw, str) or not raw.strip():
             return AnalyzeOutcome(None, "model_empty")
@@ -251,13 +256,64 @@ async def analyze_detailed(
         if grid_path is not None:
             try:
                 grid_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.debug("清理九宫格临时文件失败 type=%s", type(exc).__name__)
+
+
+VISION_MAX_ATTEMPTS = 2
+"""单张图最多试几次：第一次失败多半是网络抖动/瞬时 5xx，重试一次收益明显；
+再多就是拿钱换运气（每次尝试都计一次识图预算）。"""
+VISION_RETRY_BACKOFF = 1.2
+"""第 N 次重试前等 N × 这个秒数。"""
+
+
+async def analyze_with_retry(
+    path: Path,
+    *,
+    prompt: str,
+    llm_call: LLMCall,
+    timeout: float | None = None,
+    work_dir: Path | None = None,
+    attempts: int = VISION_MAX_ATTEMPTS,
+    can_attempt: Callable[[], bool] | None = None,
+    on_attempt: Callable[[], None] | None = None,
+) -> AnalyzeOutcome:
+    """把单次调用包成「失败再试一次」。
+
+    `analyze_detailed` 自身坚持一次调用（I-1：一次失败不重复烧钱），重试放在这里，
+    这样入库与重新识图两条路共用同一套策略。
+
+    can_attempt：每次尝试前问一句「还允许再调吗」（预算用尽就停），
+    返回 False 时带着上一次的失败原因退出；on_attempt：真正发起调用时回调（计预算）。
+    """
+    total = max(1, int(attempts))
+    outcome = AnalyzeOutcome(None, "not_attempted")
+    for index in range(1, total + 1):
+        if can_attempt is not None and not can_attempt():
+            logger.info("识图预算已用完，停止重试 attempt=%s", index)
+            break
+        if on_attempt is not None:
+            on_attempt()
+        outcome = await analyze_detailed(
+            path,
+            prompt=prompt,
+            llm_call=llm_call,
+            timeout=timeout,
+            work_dir=work_dir,
+        )
+        if outcome.analysis is not None:
+            return outcome
+        if index < total:
+            logger.debug("识图失败，%.1fs 后重试 reason=%s", VISION_RETRY_BACKOFF * index, outcome.reason)
+            await asyncio.sleep(VISION_RETRY_BACKOFF * index)
+    return outcome
 
 
 __all__ = [
     "AnalyzeOutcome",
+    "VISION_MAX_ATTEMPTS",
     "analyze_detailed",
+    "analyze_with_retry",
     "build_prompt",
     "clean_list",
     "clean_text",

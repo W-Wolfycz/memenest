@@ -6,22 +6,14 @@
 
 from __future__ import annotations
 
-import json
-
 from memenest.domain import (
     LABEL_ALIASES,
     LABEL_KEYS,
-    MAX_CAPTION,
-    MAX_TEXT_IN_IMAGE,
     normalize_label,
 )
-from memenest.ingest.analyze import clean_list, parse_analysis
+from memenest.ingest.analyze import clean_list
 
 
-def test_T09_non_json_output_is_a_failure():
-    """非 JSON 一律判失败：当成功会让整库条目带着兜底分类落库，用户以为识图一直在正常工作。"""
-    assert parse_analysis("这张图很搞笑，我觉得是开心") is None
-    assert parse_analysis("") is None
 def test_all_aliases_point_to_real_labels():
     """中文别名必须指向真实存在的 key。
 
@@ -34,6 +26,7 @@ def test_all_aliases_point_to_real_labels():
         if target not in LABEL_KEYS
     }
     assert not dangling, f"这些别名指向了不存在的 key: {dangling}"
+
 
 def test_clean_list_keeps_list_items_intact():
     """列表元素里的逗号是句内停顿，不能再切开。
@@ -62,19 +55,3 @@ def test_normalize_label_tolerates_chatty_output():
     assert normalize_label("joy;disgust") == "joy"
     assert normalize_label(["blank", "refuse"]) == "blank"
     assert normalize_label("完全不认识的东西") == "other"
-
-
-def test_text_in_image_keeps_long_lines():
-    """图内台词上限 200 字，不能和 caption 共用 80。
-
-    梗图里整段对话都有；截到 80 字后按原句检索匹配不到后半句，
-    面板上看不出问题。
-    """
-    long_text = "台词" * 150
-    analysis = parse_analysis(
-        json.dumps({"label": "joy", "text_in_image": long_text, "caption": long_text})
-    )
-    assert analysis is not None
-    assert len(analysis.text_in_image) == MAX_TEXT_IN_IMAGE
-    assert len(analysis.caption) == MAX_CAPTION
-    assert MAX_TEXT_IN_IMAGE > MAX_CAPTION

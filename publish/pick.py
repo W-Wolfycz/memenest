@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import random
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .gate import session_key
 from ..domain import GENERIC_PERSONA, SCOPE_ORIGIN, Memo
@@ -49,10 +49,17 @@ class PickWeights:
     usage: float = 1.0
     fav: float = 0.8
     recency: float = 2.0
+    category_recent: float = 0.8
+    """同类最近使用惩罚的起点：排名越靠前扣得越多，只压同类、不跨类。"""
+    prior: float = 0.4
+    """标点先验命中主标签时的加分。刻意小于 overlap/scene，只做方向、不做决定。"""
     jitter: float = 0.05
 
 
 DEFAULT_WEIGHTS = PickWeights()
+
+CATEGORY_RECENT_STEPS = 4
+"""同类最近使用惩罚覆盖前几名。"""
 
 
 @dataclass(slots=True)
@@ -63,6 +70,10 @@ class PickContext:
     context_keywords: tuple[str, ...] = ()
     """用户消息切出的词：匹配 scenes。话题词没有说话人，回复那路也会参与。"""
     recent_ids: tuple[int, ...] = ()
+    recent_by_label: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    """每个分类最近用过的几张：只压「刚用过的同类」，不影响别的分类。"""
+    expected_labels: frozenset[str] = frozenset()
+    """从标点推断出的情绪标签（弱先验，命中只加一点分）。"""
     weights: PickWeights = DEFAULT_WEIGHTS
     turn_blocked: bool = False
     rng: random.Random | None = None
@@ -70,6 +81,18 @@ class PickContext:
     persona_filter: bool = True
     min_score: float = 0.0
     """最高分低于它就不发。0 表示不设限——包括全场负分时照常发。"""
+
+
+def category_recent_penalty(
+    recent_ids: tuple[int, ...], memo_id: int, step: float
+) -> float:
+    """同类最近使用的扣分：越近扣越多，超出窗口不扣。"""
+    if not recent_ids or memo_id not in recent_ids:
+        return 0.0
+    rank = recent_ids.index(memo_id)
+    if rank >= CATEGORY_RECENT_STEPS:
+        return 0.0
+    return step * (1.0 - rank * 0.25)
 
 
 def extract_keywords(text: str, limit: int = KEYWORD_MAX) -> tuple[str, ...]:
@@ -174,6 +197,16 @@ def score_memo(memo: Memo, context: PickContext) -> float:
         position = context.recent_ids.index(memo.id)
         span = max(1, len(context.recent_ids))
         score -= weights.recency * (1.0 + (span - position) / span)
+    if context.recent_by_label:
+        # 只压同类：全局最近使用已经压过一次，这里再压「同一情绪刚发过的那几张」
+        score -= category_recent_penalty(
+            context.recent_by_label.get(memo.label, ()),
+            memo.id,
+            weights.category_recent,
+        )
+    if context.expected_labels and memo.label in context.expected_labels:
+        # 标点先验：语气强的时候补一点，压不过关键词与话题命中（值见 PickWeights.prior）
+        score += weights.prior
     rng = context.rng
     jitter_value = rng.random() if rng is not None else random.random()
     score += weights.jitter * jitter_value

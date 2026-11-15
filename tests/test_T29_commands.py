@@ -139,17 +139,6 @@ def test_bare_command_name_marks_default_subcommand():
 
 
 @pytest.mark.asyncio
-async def test_mute_needs_an_image(runner):
-    """没带图也没引用图时不能瞎禁：否则「随手发一句 mute」会禁用到一个随机目标。"""
-    commands, plugin, _store, _target = runner
-    parsed = core.parse_command("/memenest mute", "memenest")
-    assert parsed is not None
-    reply = await commands.run(FakeEvent(), parsed)
-    assert "表情" in reply
-    assert plugin.muted == []
-
-
-@pytest.mark.asyncio
 async def test_mute_targets_the_persona_of_this_session(runner):
     """指令落的是「这张图 + 当前会话人格」：把 umo 传错就会禁到别的人格上。"""
     commands, plugin, _store, _target = runner

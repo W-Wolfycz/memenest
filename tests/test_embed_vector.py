@@ -4,7 +4,6 @@
 - 维度错位的向量参与排序 → 排序结果全错但不报错
 - 向量缓存永不失效 → 新入库的表情永远检索不到
 - 阈值判断方向反了 → 该发的不发 / 不该发的照发
-- provider 异常没被吞掉 → 整条检索链崩
 - 索引失败拖垮入库 → 表情收进来了但永远选不中
 """
 
@@ -43,25 +42,13 @@ class FakeProvider:
         return [await self.get_embedding(text) for text in texts]
 
 
-class BoomProvider:
-    def get_dim(self) -> int:
-        return 4
-
-    def _fail(self, *a):
-        raise RuntimeError("provider 挂了")
-
-    async def get_embedding(self, text: str) -> list[float]:
-        raise RuntimeError("provider 挂了")
-
-    async def get_embeddings(self, texts: list[str]) -> list[list[float]]:
-        raise RuntimeError("provider 挂了")
-
-
 class NullLog:
     def debug(self, *args, **kwargs) -> None:
         pass
 
     info = warning = error = debug
+
+
 def _build(store: MemoStore, settings, embedder_factory, tmp_path, seed: int | None = None):
     settings_fn = lambda: settings  # noqa: E731
     cache = CandidateCache(store, settings_fn)

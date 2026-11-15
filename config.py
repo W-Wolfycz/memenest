@@ -155,6 +155,10 @@ class Settings:
     vision_provider_id: str = ""
     review_enabled: bool = True
     library_cap: int = 800
+    inbox_cap: int = 200
+    """待审核池上限：满了暂停自动收集（`grab` 与面板导入不受限）。0 = 不限。"""
+    daily_vision_budget: int = 0
+    """每天最多调多少次视觉模型（含失败）：超了新收的按裸条目进审核池。0 = 不限。"""
     send_enabled: bool = True
     send_tools_enabled: bool = True
     send_ratio: float = 0.25
@@ -219,6 +223,10 @@ def load_settings(raw: dict[str, Any] | None, *, warn: Any = None) -> Settings:
         vision_provider_id=str(data.get("vision_provider_id") or "").strip(),
         review_enabled=_as_bool(data.get("review_enabled"), True),
         library_cap=_as_int(data.get("library_cap"), 800, 10, 100_000),
+        inbox_cap=_as_int(data.get("inbox_cap"), 200, 0, 100_000),
+        daily_vision_budget=_as_int(
+            data.get("daily_vision_budget"), 0, 0, 100_000
+        ),
         send_enabled=_as_bool(data.get("send_enabled"), True),
         send_tools_enabled=_as_bool(data.get("send_tools_enabled"), True),
         send_ratio=_as_float(data.get("send_ratio"), 0.25),
@@ -261,6 +269,8 @@ _KNOWN_KEYS = frozenset(
         "vision_provider_id",
         "review_enabled",
         "library_cap",
+        "inbox_cap",
+        "daily_vision_budget",
         # 发表情
         "send_enabled",
         "send_tools_enabled",

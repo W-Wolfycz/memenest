@@ -128,16 +128,12 @@ GENERIC_PERSONA = "*"
 
 SCOPE_ANY = "any"
 SCOPE_ORIGIN = "origin"
-SCOPES = (SCOPE_ANY, SCOPE_ORIGIN)
 
 STATE_INBOX = "inbox"
 STATE_READY = "ready"
 STATE_DISABLED = "disabled"
 """人工停用：留在库里但不会被挑中发送。"""
-STATES = (STATE_INBOX, STATE_READY, STATE_DISABLED)
 
-ORIGIN_CHAT = "chat"
-ORIGIN_ADMIN = "admin"
 ORIGIN_IMPORT = "import"
 
 MAX_SCENES = 3

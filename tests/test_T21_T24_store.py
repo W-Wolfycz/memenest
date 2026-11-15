@@ -63,12 +63,7 @@ def test_T24_url_checks():
     assert check_url("https://cdn.example.com/a.png") == (True, "url_ok")
     # 公网 IP 的标准点分十进制是正常来源，不能和「非标准数字写法」一起拦掉
     assert check_url("http://1.2.3.4/a.png") == (True, "url_ok")
+    # 127.1 / 整数写法：部分平台的 getaddrinfo 会把它解析成内网地址
+    for host in ("2130706433", "127.1"):
+        assert check_url(f"http://{host}/x") == (False, "url_host_denied"), host
     assert check_url("") == (False, "url_empty")
-
-
-@pytest.mark.parametrize(
-    "host", ["2130706433", "127.1"]
-)
-def test_T24_numeric_host_forms_are_forbidden(host):
-    """127.1 / 整数 / 十六进制写法：部分平台的 getaddrinfo 会解析成内网地址。"""
-    assert check_url(f"http://{host}/x") == (False, "url_host_denied")

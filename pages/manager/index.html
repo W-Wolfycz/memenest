@@ -4,13 +4,20 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>表情窝</title>
-    <link rel="stylesheet" href="./style.css?v=20261030a" />
+    <link rel="stylesheet" href="./style.css?v=20261116a" />
+    <link rel="stylesheet" href="./overview.css?v=20261116a" />
   </head>
-  <body>
+  <body data-view="overview">
     <header class="top">
       <div class="title">
         <h1 id="page-title">表情窝</h1>
-        <p class="sub" id="page-sub">收集、审核、拉黑、导入，全在这里</p>
+        <p class="sub" id="page-sub">大盘与表情管理</p>
+        <nav class="tabs" id="tabs" role="tablist" aria-label="视图">
+          <button class="tab is-active" id="tab-overview" data-view="overview"
+            type="button" role="tab" aria-selected="true">大盘</button>
+          <button class="tab" id="tab-manager" data-view="manager"
+            type="button" role="tab" aria-selected="false">表情管理</button>
+        </nav>
       </div>
       <div class="chips" id="chips"></div>
       <div class="quick-index" id="quick-index">
@@ -19,6 +26,10 @@
         <button class="btn small" id="reindex-full" type="button" title="清空后全部重算">重建</button>
       </div>
       <div class="quick-state">
+        <button class="btn small" id="search-preview" type="button"
+          title="输入一句话看两条检索路的 top 候选">试一试</button>
+        <button class="btn small" id="backup-panel" type="button"
+          title="把库与图片打包成 zip 备份">备份</button>
         <button class="btn small" id="bulk-review" type="button">全部审核</button>
         <button class="btn small" id="bulk-disable" type="button">全部禁用</button>
         <button class="btn small" id="bulk-enable" type="button">全部启用</button>
@@ -26,153 +37,254 @@
       <button class="btn ghost" id="refresh" type="button">刷新</button>
     </header>
 
-    <section class="toolbar">
-      <label class="field">
-        <span>状态</span>
-        <select id="filter-state">
-          <option value="">全部</option>
-          <option value="ready">可用</option>
-          <option value="inbox">待审核</option>
-          <option value="disabled">禁用</option>
-        </select>
-      </label>
-      <label class="field">
-        <span>分类</span>
-        <select id="filter-label">
-          <option value="">全部</option>
-          <option value="joy">开心</option>
-          <option value="laugh">大笑</option>
-          <option value="smug">得意</option>
-          <option value="kudos">称赞</option>
-          <option value="cheer">鼓励</option>
-          <option value="love">心动</option>
-          <option value="shy">害羞</option>
-          <option value="sad">难过</option>
-          <option value="cry">哭泣</option>
-          <option value="upset">生气</option>
-          <option value="blank">无语</option>
-          <option value="awkward">尴尬</option>
-          <option value="puzzle">疑惑</option>
-          <option value="wow">震惊</option>
-          <option value="alarm">害怕</option>
-          <option value="drowsy">疲惫</option>
-          <option value="slack">摸鱼</option>
-          <option value="refuse">拒绝</option>
-          <option value="expect">期待</option>
-          <option value="other">其他</option>
-        </select>
-      </label>
-      <label class="field">
-        <span>人格</span>
-        <select id="filter-persona">
-          <option value="">全部</option>
-        </select>
-      </label>
-      <label class="field grow">
-        <span>搜索</span>
-        <input id="filter-q" type="search" placeholder="模糊搜索：描述、图上文字、场景" />
-      </label>
-      <label class="field">
-        <span>每页</span>
-        <select id="page-size">
-          <option value="12">12</option>
-          <option value="24">24</option>
-          <option value="48">48</option>
-        </select>
-      </label>
-      <button class="btn primary" id="toggle-import" type="button">导入</button>
-      <button class="btn ghost" id="toggle-blocked" type="button">黑名单</button>
+    <!-- ============ 大盘 ============ -->
+    <section id="view-overview" class="ov">
+      <div class="ov-hero">
+        <div class="ov-stats" id="ov-hero-stats"></div>
+        <div class="ov-meta">
+          <span class="hint" id="ov-updated"></span>
+          <button class="btn small ghost" id="ov-refresh" type="button">刷新</button>
+        </div>
+      </div>
+
+      <div id="ov-health" class="ov-alerts" hidden></div>
+
+      <div class="ov-grid three">
+        <section class="ov-block">
+          <h2>库</h2>
+          <div class="ov-rows" id="ov-lib-rows"></div>
+          <div class="ov-track big"><i id="ov-lib-bar"></i></div>
+          <p class="hint" id="ov-lib-cap"></p>
+        </section>
+
+        <section class="ov-block">
+          <h2>识图</h2>
+          <div class="ov-rows" id="ov-vision-rows"></div>
+          <p class="hint" id="ov-vision-note"></p>
+        </section>
+
+        <section class="ov-block">
+          <h2>检索</h2>
+          <div class="ov-rows" id="ov-vector-rows"></div>
+          <p class="hint" id="ov-vector-note"></p>
+          <div class="ov-actions">
+            <button class="btn small" id="ov-reindex" type="button">补齐向量</button>
+          </div>
+        </section>
+      </div>
+
+      <div class="ov-grid three spaced">
+        <section class="ov-block">
+          <h2>存储</h2>
+          <div class="ov-rows" id="ov-storage-rows"></div>
+        </section>
+
+        <section class="ov-block">
+          <h2>发送</h2>
+          <div class="ov-rows" id="ov-send-rows"></div>
+          <div class="ov-badges" id="ov-send-reject"></div>
+        </section>
+
+        <section class="ov-block">
+          <h2>处置</h2>
+          <div class="ov-actions">
+            <button class="btn small danger" id="ov-drop-missing" type="button" hidden
+              title="删掉「库里有记录、磁盘没有文件」的条目，删完不可恢复">删除缺失</button>
+            <button class="btn small" id="ov-reanalyze" type="button"
+              title="只给「无描述」的条目重跑视觉模型">重新识图</button>
+            <button class="btn small" id="ov-integrity" type="button"
+              title="对账库与磁盘：缺失文件、孤儿文件、目录占用">完整性体检</button>
+            <button class="btn small" id="ov-vacuum" type="button"
+              title="回收删除留下的空页（VACUUM）">整理数据库</button>
+            <button class="btn small danger" id="ov-orphans" type="button"
+              title="删除没有任何记录引用的图片文件">清理孤儿</button>
+          </div>
+          <div class="ov-progress" id="ov-reanalyze-progress" hidden>
+            <div class="ov-track"><i id="ov-reanalyze-bar"></i></div>
+            <span class="hint" id="ov-reanalyze-text"></span>
+          </div>
+        </section>
+      </div>
+
+      <div class="ov-grid one spaced">
+        <section class="ov-block">
+          <h2>标签分布<span class="hint"> · 空心的说明提示词没覆盖到</span></h2>
+          <div class="ov-bars" id="ov-label-grid"></div>
+        </section>
+      </div>
+
+      <div class="ov-grid two">
+        <section class="ov-block">
+          <h2>来源 Top</h2>
+          <div class="ov-rows" id="ov-origin-grid"></div>
+        </section>
+        <section class="ov-block">
+          <h2>最近发送</h2>
+          <div class="ov-sends" id="ov-recent-sends"></div>
+        </section>
+      </div>
     </section>
 
-    <section class="panel" id="import-panel" hidden>
-      <div class="panel-row">
-        <textarea
-          id="import-urls"
-          rows="3"
-          aria-label="图片 URL 列表"
-          placeholder="图片 URL（http/https），空白或换行分隔，单次最多 20 条"
-        ></textarea>
-      </div>
-      <div class="panel-row">
+    <!-- ============ 表情管理 ============ -->
+    <section id="view-manager" hidden>
+      <section class="toolbar">
         <label class="field">
-          <span>人格</span>
-          <input id="import-persona" list="persona-options" placeholder="留空=通用" />
+          <span>状态</span>
+          <select id="filter-state">
+            <option value="">全部</option>
+            <option value="ready">可用</option>
+            <option value="inbox">待审核</option>
+            <option value="disabled">禁用</option>
+          </select>
         </label>
         <label class="field">
-          <span>作用域</span>
-          <select id="import-scope">
-            <option value="any">所有会话</option>
-            <option value="origin">仅指定群/私聊</option>
+          <span>分类</span>
+          <select id="filter-label">
+            <option value="">全部</option>
+            <option value="joy">开心</option>
+            <option value="laugh">大笑</option>
+            <option value="smug">得意</option>
+            <option value="kudos">称赞</option>
+            <option value="cheer">鼓励</option>
+            <option value="love">心动</option>
+            <option value="shy">害羞</option>
+            <option value="sad">难过</option>
+            <option value="cry">哭泣</option>
+            <option value="upset">生气</option>
+            <option value="blank">无语</option>
+            <option value="awkward">尴尬</option>
+            <option value="puzzle">疑惑</option>
+            <option value="wow">震惊</option>
+            <option value="alarm">害怕</option>
+            <option value="drowsy">疲惫</option>
+            <option value="slack">摸鱼</option>
+            <option value="refuse">拒绝</option>
+            <option value="expect">期待</option>
+            <option value="other">其他</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>人格</span>
+          <select id="filter-persona">
+            <option value="">全部</option>
           </select>
         </label>
         <label class="field grow">
-          <span>会话</span>
-          <input id="import-umo" placeholder="G:群号 或 F:QQ号（仅「仅指定群/私聊」需要）" />
+          <span>搜索</span>
+          <input id="filter-q" type="search" placeholder="模糊搜索：描述、图上文字、场景" />
         </label>
-      </div>
-      <div class="panel-row">
-        <button class="btn primary" id="do-import" type="button">导入 URL</button>
-        <label class="file">
-          <input id="import-files" type="file" accept=".png,.jpg,.jpeg,.gif,.webp,.bmp" multiple />
-          <span>选择本地图片</span>
+        <label class="field">
+          <span>每页</span>
+          <select id="page-size">
+            <option value="12">12</option>
+            <option value="24">24</option>
+            <option value="48">48</option>
+          </select>
         </label>
-        <span class="hint" id="import-files-hint">未选择文件</span>
-        <button class="btn primary" id="do-import-files" type="button" disabled>上传所选</button>
-      </div>
-      <div class="panel-row" id="import-progress-wrap" hidden>
-        <progress id="import-progress" max="100" value="0"></progress>
-        <span class="hint" id="import-progress-text"></span>
-      </div>
-      <div class="panel-row" id="import-status"></div>
-    </section>
+        <button class="btn primary" id="toggle-import" type="button">导入</button>
+        <button class="btn ghost" id="toggle-blocked" type="button">黑名单</button>
+      </section>
 
-    <section class="panel" id="blocked-panel" hidden>
-      <div class="panel-row between">
-        <strong>已拉黑</strong>
-        <span class="hint">点「解禁」后同图可以重新入库</span>
-      </div>
-      <div id="blocked-list" class="blocked-list"></div>
-      <div class="panel-row pager">
-        <button class="btn ghost" id="blocked-first" type="button">首页</button>
-        <button class="btn ghost" id="blocked-prev" type="button">上一页</button>
-        <span id="blocked-page-info" class="hint"></span>
-        <button class="btn ghost" id="blocked-next" type="button">下一页</button>
-        <button class="btn ghost" id="blocked-last" type="button">末页</button>
+      <section class="panel" id="import-panel" hidden>
+        <div class="panel-row">
+          <textarea
+            id="import-urls"
+            rows="3"
+            aria-label="图片 URL 列表"
+            placeholder="图片 URL（http/https），空白或换行分隔，单次最多 20 条"
+          ></textarea>
+        </div>
+        <div class="panel-row">
+          <label class="field">
+            <span>人格</span>
+            <input id="import-persona" list="persona-options" placeholder="留空=通用" />
+          </label>
+          <label class="field">
+            <span>作用域</span>
+            <select id="import-scope">
+              <option value="any">所有会话</option>
+              <option value="origin">仅指定群/私聊</option>
+            </select>
+          </label>
+          <label class="field grow">
+            <span>会话</span>
+            <input id="import-umo" placeholder="G:群号 或 F:QQ号（仅「仅指定群/私聊」需要）" />
+          </label>
+        </div>
+        <div class="panel-row">
+          <button class="btn primary" id="do-import" type="button">导入 URL</button>
+          <label class="file">
+            <input id="import-files" type="file" multiple
+              accept=".png,.jpg,.jpeg,.gif,.webp,.bmp" />
+            <span>选择本地图片</span>
+          </label>
+          <span class="hint" id="import-files-hint">未选择文件</span>
+          <button class="btn primary" id="do-import-files" type="button" disabled>上传所选</button>
+        </div>
+        <div class="panel-row">
+          <label class="field grow">
+            <span>清单 URL</span>
+            <input id="import-manifest" placeholder="https://…/list.json（数组或 {items:[…]}）" />
+          </label>
+          <button class="btn primary" id="do-import-manifest" type="button">导入清单</button>
+        </div>
+        <div class="panel-row" id="import-progress-wrap" hidden>
+          <progress id="import-progress" max="100" value="0"></progress>
+          <span class="hint" id="import-progress-text"></span>
+        </div>
+        <div class="panel-row" id="import-status"></div>
+      </section>
+
+      <section class="panel" id="blocked-panel" hidden>
+        <div class="panel-row between">
+          <strong>已拉黑</strong>
+          <span class="hint">点「解禁」后同图可以重新入库</span>
+        </div>
+        <div id="blocked-list" class="blocked-list"></div>
+        <div class="panel-row pager">
+          <button class="btn ghost" id="blocked-first" type="button">首页</button>
+          <button class="btn ghost" id="blocked-prev" type="button">上一页</button>
+          <span id="blocked-page-info" class="hint"></span>
+          <button class="btn ghost" id="blocked-next" type="button">下一页</button>
+          <button class="btn ghost" id="blocked-last" type="button">末页</button>
+          <label class="page-jump">
+            <span>第</span>
+            <input id="blocked-page-jump" type="number" min="1" inputmode="numeric" />
+            <span>页</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="bulkbar" id="bulkbar" hidden>
+        <span>已选 <b id="selected-count">0</b> 条</span>
+        <select id="bulk-label" aria-label="批量修改主分类"></select>
+        <span class="bulk-sep"></span>
+        <button class="btn small" data-bulk="export" type="button"
+          title="把选中的图片打包成 zip 下载">导出</button>
+        <button class="btn small danger" data-bulk="ban" type="button">拉黑</button>
+        <button class="btn small danger" data-bulk="delete" type="button">删除</button>
+        <button class="btn small ghost" id="clear-selection" type="button">清空</button>
+      </section>
+
+      <main class="grid" id="grid"></main>
+
+      <footer class="pager">
+        <button class="btn ghost" id="first" type="button">首页</button>
+        <button class="btn ghost" id="prev" type="button">上一页</button>
+        <span id="page-info" class="hint"></span>
+        <button class="btn ghost" id="next" type="button">下一页</button>
+        <button class="btn ghost" id="last" type="button">末页</button>
         <label class="page-jump">
           <span>第</span>
-          <input id="blocked-page-jump" type="number" min="1" inputmode="numeric" />
+          <input id="page-jump" type="number" min="1" inputmode="numeric" />
           <span>页</span>
         </label>
-      </div>
+        <label class="field inline">
+          <input id="select-page" type="checkbox" />
+          <span>全选本页</span>
+        </label>
+      </footer>
     </section>
-
-    <section class="bulkbar" id="bulkbar" hidden>
-      <span>已选 <b id="selected-count">0</b> 条</span>
-      <select id="bulk-label" aria-label="批量修改主分类"></select>
-      <span class="bulk-sep"></span>
-      <button class="btn small danger" data-bulk="ban" type="button">拉黑</button>
-      <button class="btn small danger" data-bulk="delete" type="button">删除</button>
-      <button class="btn small ghost" id="clear-selection" type="button">清空</button>
-    </section>
-
-    <main class="grid" id="grid"></main>
-
-    <footer class="pager">
-      <button class="btn ghost" id="first" type="button">首页</button>
-      <button class="btn ghost" id="prev" type="button">上一页</button>
-      <span id="page-info" class="hint"></span>
-      <button class="btn ghost" id="next" type="button">下一页</button>
-      <button class="btn ghost" id="last" type="button">末页</button>
-      <label class="page-jump">
-        <span>第</span>
-        <input id="page-jump" type="number" min="1" inputmode="numeric" />
-        <span>页</span>
-      </label>
-      <label class="field inline">
-        <input id="select-page" type="checkbox" />
-        <span>全选本页</span>
-      </label>
-    </footer>
 
     <datalist id="persona-options"></datalist>
     <div class="modal" id="modal" hidden>
@@ -180,6 +292,7 @@
       <div class="modal-panel" id="modal-panel" role="dialog" aria-modal="true"></div>
     </div>
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
-    <script type="module" src="./app.js?v=20261030a"></script>
+    <script type="module" src="./app.js?v=20261116a"></script>
+    <script type="module" src="./overview.js?v=20261116a"></script>
   </body>
 </html>

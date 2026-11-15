@@ -10,6 +10,9 @@ percept_hash：8x8 灰度梯度指纹（64 bit），用来识别不同压缩率/
 from __future__ import annotations
 
 import hashlib
+import logging
+
+logger = logging.getLogger(__name__)
 
 PERCEPT_SIDE_X = 9
 PERCEPT_SIDE_Y = 8
@@ -39,7 +42,8 @@ def trim_border(image: object) -> object:
             return image
         pixels = rgb.load()
         base = pixels[0, 0]
-    except Exception:
+    except Exception as exc:
+        logger.debug("裁剪边框前读取像素失败 type=%s", type(exc).__name__)
         return image
 
     def same(color: object) -> bool:
@@ -71,7 +75,9 @@ def trim_border(image: object) -> object:
             same(pixels[right, y]) for y in range(top, bottom + 1, step_y)
         ):
             right -= 1
-    except Exception:
+    except Exception as exc:
+        # 逐行扫描时越界/像素异常：放弃裁剪（不裁只会让重复判定更保守）
+        logger.debug("扫描边框失败，按无边框处理 type=%s", type(exc).__name__)
         return image
 
     kept_w = right - left + 1
@@ -84,19 +90,23 @@ def trim_border(image: object) -> object:
         return image
     try:
         return rgb.crop((left, top, right + 1, bottom + 1))
-    except Exception:
+    except Exception as exc:
+        logger.debug("裁剪边框失败，按无边框处理 type=%s", type(exc).__name__)
         return image
 
 
 def percept_hash(image: object) -> str | None:
-    """对 PIL 图像算梯度指纹；任何异常都返回 None（退化为只按 content_hash 去重）。"""
+    """对 PIL 图像算梯度指纹；解码失败返回 None（退化为只按 content_hash 去重）。"""
     try:
         gray = trim_border(image).convert("L").resize(  # type: ignore[attr-defined]
             (PERCEPT_SIDE_X, PERCEPT_SIDE_Y)
         )
         # L 模式每个像素一字节，tobytes 比 getdata 更快且不触发弃用警告。
         pixels = gray.tobytes()
-    except Exception:
+    except Exception as exc:
+        # None 也可能是「纯色图没有梯度」，两种情况都让该图只靠字节哈希去重；
+        # 日志用 DEBUG 区分是解码问题还是纯色（后者没有异常、不会走到这里）。
+        logger.debug("感知指纹计算失败 type=%s", type(exc).__name__)
         return None
     bits = 0
     index = 0
@@ -123,10 +133,74 @@ def hamming(left: str, right: str) -> int:
     return int.bit_count(value)
 
 
+# 动图复合指纹：首/中/尾三帧，":" 连接（段数固定为 ANIMATED_FRAMES）。
+# 某帧算不出梯度（纯色过渡帧很常见）就整条放弃——用占位值会让两张不同动图
+# 的纯色帧互相距离 0，平均值被拉低后误判成同一张；宁可退化为字节哈希。
+ANIMATED_FRAMES = 3
+FRAME_JOIN = ":"
+
+
+def animated_percept_hash(image: object) -> str | None:
+    """动图复合指纹：等间隔抽 ANIMATED_FRAMES 帧各算一次梯度指纹再拼接。"""
+    try:
+        count = int(getattr(image, "n_frames", 1))
+    except Exception as exc:
+        logger.debug("读取 n_frames 失败 type=%s", type(exc).__name__)
+        return None
+    if count <= 1:
+        return None
+    parts: list[str] = []
+    for index in range(ANIMATED_FRAMES):
+        try:
+            image.seek(round(index * (count - 1) / (ANIMATED_FRAMES - 1)))
+            frame = image.copy()
+        except Exception as exc:
+            logger.debug("动图抽帧失败 frame=%s type=%s", index, type(exc).__name__)
+            return None
+        value = percept_hash(frame)
+        if value is None:
+            return None
+        parts.append(value)
+    return FRAME_JOIN.join(parts)
+
+
+def is_composite(hash_value: str) -> bool:
+    return FRAME_JOIN in hash_value
+
+
+def percept_within(left: str | None, right: str, threshold: int) -> bool:
+    """两条感知指纹是否判重（统一入口，dedup 只调这里）。
+
+    - 复合 vs 复合：逐帧比对，**每一帧**都要在阈值内——首帧相同、后续不同
+      的两个动画会被最差的那一帧区分开；
+    - 复合 vs 单帧（老库混存期）：比复合的**首帧**，历史单帧指纹本来就取首帧；
+    - 单帧 vs 单帧：普通汉明距离。
+    """
+    if not left or not right:
+        return False
+    if is_composite(left) and is_composite(right):
+        left_parts = left.split(FRAME_JOIN)
+        right_parts = right.split(FRAME_JOIN)
+        if len(left_parts) != len(right_parts):
+            return False
+        return all(
+            hamming(a, b) <= threshold for a, b in zip(left_parts, right_parts)
+        )
+    if is_composite(left):
+        left = left.split(FRAME_JOIN)[0]
+    if is_composite(right):
+        right = right.split(FRAME_JOIN)[0]
+    return hamming(left, right) <= threshold
+
+
 __all__ = [
+    "ANIMATED_FRAMES",
     "PERCEPT_BITS",
+    "animated_percept_hash",
     "content_hash",
     "hamming",
+    "is_composite",
     "percept_hash",
+    "percept_within",
     "trim_border",
 ]

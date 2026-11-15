@@ -523,6 +523,13 @@ input[type="checkbox"] {
   color: var(--olive);
 }
 
+/* 统计区（#chips）里也有需要警示的 chip（识图预算用满）：上面那两条只作用于
+   .quick-index，通用规则得单独给一份，否则预算耗尽时看起来一切正常。 */
+.chips .chip.warn,
+.chips .chip.warn b {
+  color: var(--danger);
+}
+
 .quick-index .mini {
   display: inline-flex;
   align-items: center;
@@ -1122,6 +1129,115 @@ input[type="checkbox"] {
   word-break: break-all;
 }
 
+/* 标签体检：21 类三列，零使用灰度显示 */
+.label-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px 10px;
+  margin-top: 4px;
+}
+
+.label-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: 400 12px/1.4 var(--font-ui);
+}
+
+.label-row b {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.label-row.zero {
+  opacity: 0.42;
+  border-style: dashed;
+}
+
+/* 试一试 / 发送记录 / 备份弹层 */
+.preview-cols {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.preview-col h3,
+.modal-sub {
+  margin: 8px 0 6px;
+  font: 600 12px/1.4 var(--font-ui);
+  color: var(--ink);
+}
+
+.result-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  margin-bottom: 6px;
+}
+
+.result-thumb {
+  width: 44px;
+  height: 44px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 400 10px/1 var(--font-mono);
+  color: var(--muted);
+  background: var(--panel);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.result-thumb img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.result-meta {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+}
+
+.result-meta b {
+  font: 600 11px/1.4 var(--font-mono);
+  color: var(--ink);
+}
+
+.result-meta p {
+  width: 100%;
+  margin: 0;
+  font: 400 11px/1.4 var(--font-ui);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.export-row {
+  align-items: center;
+}
+
 .modal-hint {
   margin: 0 0 12px;
   font: 400 11px/1.6 var(--font-mono);
@@ -1347,4 +1463,72 @@ input[type="checkbox"] {
   .pager {
     padding: 0 18px;
   }
+}
+
+/* ---------- 视图切换（大盘 / 表情管理） ---------- */
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  margin-top: 10px;
+}
+
+.tab {
+  padding: 4px 14px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: 500 12px/1.4 var(--font-ui);
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--ink);
+}
+
+.tab.is-active {
+  border-color: var(--line);
+  background: var(--panel);
+  color: var(--ink);
+}
+
+/* 大盘视图里不显示只属于管理视图的头部块 */
+body[data-view="overview"] #chips,
+body[data-view="overview"] #quick-index,
+body[data-view="overview"] .quick-state {
+  display: none;
+}
+
+/* 大盘视图自己有「刷新大盘」，管理页的刷新按钮在大盘里没有意义 */
+body[data-view="overview"] #refresh {
+  display: none;
+}
+
+/* 标签页需要看起来能点：未选中有细边框与投影，选中后压平并加重文字 */
+.tab {
+  box-shadow: 0 1px 2px rgba(23, 24, 26, 0.08);
+  background: var(--panel);
+  border-color: var(--line);
+}
+
+.tab:hover {
+  box-shadow: 0 2px 6px rgba(23, 24, 26, 0.14);
+  transform: translateY(-1px);
+}
+
+.tab.is-active {
+  box-shadow: inset 0 1px 2px rgba(23, 24, 26, 0.1);
+  background: var(--plate);
+  color: var(--ink);
+  transform: none;
+}
+
+[data-theme="dark"] .tab {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+
+[data-theme="dark"] .tab.is-active {
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.6);
 }

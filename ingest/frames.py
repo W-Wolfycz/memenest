@@ -6,8 +6,11 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 GRID_FRAMES = 9
 GRID_COLUMNS = 3
@@ -24,7 +27,9 @@ def has_animation(path: Path) -> bool:
     try:
         with Image.open(path) as image:
             return int(getattr(image, "n_frames", 1)) > 1
-    except Exception:
+    except Exception as exc:
+        # 读不出来按静态图处理：动图降级成单帧分析，结果仍可用，但要知道发生过
+        logger.debug("读取动图帧数失败 type=%s", type(exc).__name__)
         return False
 
 
@@ -36,7 +41,8 @@ def frame_count(path: Path) -> int:
     try:
         with Image.open(path) as image:
             return max(1, int(getattr(image, "n_frames", 1)))
-    except Exception:
+    except Exception as exc:
+        logger.debug("读取帧数失败，按 1 帧处理 type=%s", type(exc).__name__)
         return 1
 
 
@@ -124,7 +130,9 @@ def compose_grid(
             target.parent.mkdir(parents=True, exist_ok=True)
             canvas.save(target, format="JPEG", quality=88)
             return True
-    except Exception:
+    except Exception as exc:
+        # 合成失败会让动图退回单帧分析：模型只看到首帧，分类质量会变差但不报错
+        logger.warning("合成九宫格失败，动图将按单帧分析 type=%s", type(exc).__name__)
         return False
 
 

@@ -12,7 +12,12 @@ from PIL import Image
 
 from _fixtures import FakeMemoSource
 from memenest.ingest.dedup import find_duplicate
-from memenest.ingest.fingerprints import content_hash, hamming, percept_hash
+from memenest.ingest.fingerprints import (
+    animated_percept_hash,
+    content_hash,
+    hamming,
+    percept_hash,
+)
 
 
 def _gradient(seed: int, size: int = 128) -> Image.Image:
@@ -95,3 +100,60 @@ def test_solid_image_yields_no_percept_hash():
     当成「同一张图」。
     """
     assert percept_hash(Image.new("RGB", (200, 200), (120, 40, 200))) is None
+
+
+def _save_gif(frames: list[Image.Image], path, size: tuple[int, int]) -> None:
+    """同一组帧按给定尺寸存一份 GIF：字节不同，帧内容按比例缩放。"""
+    resized = [frame.resize(size) for frame in frames]
+    resized[0].save(path, save_all=True, append_images=resized[1:], duration=100, loop=0)
+
+
+def test_same_animation_resized_is_duplicate_but_first_frame_twin_is_not(tmp_path):
+    """动图判重的两个方向。
+
+    - 同一动画改尺寸重编码：三帧都在阈值内 → 判重；
+    - 首帧相同、后续帧完全不同的两个动画：最差帧把距离拉开 → 不判重。
+    后者写坏（退化成只比首帧）时新表情会被静默吞掉，只有比对能拦。
+    """
+
+    def stripes(offset: int) -> Image.Image:
+        image = Image.new("L", (48, 48))
+        pixels = image.load()
+        for x in range(48):
+            for y in range(48):
+                pixels[x, y] = 255 if ((x + offset) // 6) % 2 else 0
+        return image.convert("RGB")
+
+    from PIL import Image as PILImage
+
+    same_frames = [stripes(0), stripes(6)]
+    a_path, b_path = tmp_path / "a.gif", tmp_path / "b.gif"
+    _save_gif(same_frames, a_path, (48, 48))
+    _save_gif(same_frames, b_path, (40, 40))  # 同动画、改尺寸 → 字节不同
+
+    twin_frames = [stripes(0), stripes(3)]  # 首帧相同、第二帧相位错开
+    c_path = tmp_path / "c.gif"
+    _save_gif(twin_frames, c_path, (48, 48))
+
+    hashes = {}
+    for key, path in (("a", a_path), ("b", b_path), ("c", c_path)):
+        with PILImage.open(path) as image:
+            hashes[key] = animated_percept_hash(image)
+    assert all(hashes.values()), "前置条件：三份动图都要算得出复合指纹"
+
+    same = FakeMemoSource(rows=[(21, hashes["a"])])
+    verdict = find_duplicate(same, "c" * 64, hashes["b"], threshold=8)
+    assert verdict.duplicate is True, "同动画改尺寸必须判重"
+
+    twin = FakeMemoSource(rows=[(21, hashes["a"])])
+    verdict = find_duplicate(twin, "c" * 64, hashes["c"], threshold=8)
+    assert verdict.duplicate is False, "首帧相同的不同动画不能判重"
+
+    # 混存期：复合 vs 老库单帧（首帧指纹）仍能判重
+    with PILImage.open(a_path) as image:
+        image.seek(0)
+        first_frame_only = percept_hash(image.copy())
+    assert first_frame_only is not None
+    mixed = FakeMemoSource(rows=[(31, first_frame_only)])
+    verdict = find_duplicate(mixed, "d" * 64, hashes["a"], threshold=8)
+    assert verdict.duplicate is True, "复合指纹要能对上老库的首帧指纹"

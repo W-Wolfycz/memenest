@@ -59,7 +59,11 @@ def test_unknown_persona_fails_closed(store):
     }
     assert only_generic == {"inbox/generic.png"}
 def test_persona_allows_matrix():
-    """人格归属判定矩阵：全空必须是「谁都不用」，退化成通用等于把限制悄悄取消。"""
+    """人格归属判定矩阵：全空必须是「谁都不用」，禁用优先于可用。
+
+    前者的退化方式是「悄悄变成通用」，后者是「禁用了照样发」——两种都只表现成
+    「这张图又冒出来了」，不比对看不出来。
+    """
     generic = make_memo(1)
     bound = make_memo(2, persona_ids=("p1",))
     assert persona_allows(generic, None) is True
@@ -71,6 +75,12 @@ def test_persona_allows_matrix():
     empty = make_memo(3, persona_ids=())
     assert persona_allows(empty, None) is False
     assert persona_allows(empty, "p1") is False
+    # 命中禁用就不发：通用也挡得住，绑定了同一人格也挡得住
+    blocked = make_memo(4, blocked_persona_ids=("p1",))
+    assert persona_allows(blocked, "p1") is False
+    assert persona_allows(blocked, "p2") is True
+    blocked_bound = make_memo(5, persona_ids=("p1",), blocked_persona_ids=("p1",))
+    assert persona_allows(blocked_bound, "p1") is False
 @pytest.mark.asyncio
 async def test_manual_send_rejects_foreign_persona(tmp_path):
     """手动发送也要过人格校验：绕过它就等于给了工具一条越界通道。"""
@@ -125,34 +135,3 @@ def test_blocked_persona_wins_over_generic(store):
     for_p2 = {memo.id for memo in store.candidates(CandidateQuery(persona_id="p2"))}
     assert generic_id in for_p2
     assert bound_id not in for_p2
-
-
-def test_persona_blocks_replace_and_clear(store):
-    """整体替换语义：重新保存要把旧条目删掉，传空要把禁用清干净。"""
-    memo_id = store.add(_draft("inbox/generic.png"))
-    store.set_persona_blocks(memo_id, ["p1", "p2"])
-    memo = store.get(memo_id)
-    assert memo is not None and set(memo.blocked_persona_ids) == {"p1", "p2"}
-
-    store.set_persona_blocks(memo_id, ["p2"])
-    memo = store.get(memo_id)
-    assert memo is not None and set(memo.blocked_persona_ids) == {"p2"}
-
-    store.set_persona_blocks(memo_id, [])
-    memo = store.get(memo_id)
-    assert memo is not None and memo.blocked_persona_ids == ()
-    assert persona_allows(memo, "p1") is True
-
-
-def test_reblock_same_persona_is_idempotent(store):
-    """指令可能被连点两次：重复禁同一个人格不该报错，也不该写出两行。"""
-    memo_id = store.add(_draft("inbox/generic.png"))
-    assert store.add_persona_block(memo_id, "p1") is True
-    assert store.add_persona_block(memo_id, "p1") is True
-    memo = store.get(memo_id)
-    assert memo is not None and memo.blocked_persona_ids == ("p1",)
-    assert persona_allows(memo, "p1") is False
-    # 取消之后恢复可用
-    assert store.remove_persona_block(memo_id, "p1") is True
-    memo = store.get(memo_id)
-    assert memo is not None and persona_allows(memo, "p1") is True

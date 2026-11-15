@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .fingerprints import hamming
+from .fingerprints import percept_within
 
 
 @dataclass(slots=True)
@@ -47,7 +47,7 @@ def find_duplicate(
         return DedupVerdict(False, "unique")
     rows = percept_rows if percept_rows is not None else store.percept_rows()
     for memo_id, candidate in rows:
-        if hamming(percept_hash, candidate) <= threshold:
+        if percept_within(percept_hash, candidate, threshold):
             return DedupVerdict(True, "duplicate_percept", memo_id)
     return DedupVerdict(False, "unique")
 

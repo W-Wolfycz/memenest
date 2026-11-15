@@ -207,11 +207,14 @@ async function loadStats() {
   if (!data || !data.ok) return;
   state.importConcurrency = Math.max(1, Number(data.import_concurrency) || 2);
   // 视觉模型没配的时候，新条目会全部落成「其他」——不说出来没人知道为什么
-  const sub = $("page-sub");
-  sub.textContent = data.model_available
-    ? "收集、审核、拉黑、导入，全在这里"
-    : "没有可用的视觉模型，新收的图只会落成「其他」";
-  sub.classList.toggle("warn", !data.model_available);
+  // 大盘视图有自己的副标题，这里只在管理视图里改，避免异步回来后覆盖掉它
+  if (document.body.dataset.view === "manager") {
+    const sub = $("page-sub");
+    sub.textContent = data.model_available
+      ? "收集、审核、拉黑、导入，全在这里"
+      : "没有可用的视觉模型，新收的图只会落成「其他」";
+    sub.classList.toggle("warn", !data.model_available);
+  }
 
   const chips = [
     ["总数", data.total],
@@ -224,6 +227,19 @@ async function loadStats() {
   $("chips").innerHTML = chips
     .map(([label, value]) => `<span class="chip">${label}<b>${value}</b></span>`)
     .join("");
+  // 识图预算 chip：开了预算才显示；用满变警示色（黄条语义，不占一行）
+  const budget = data.vision_budget || { used: 0, limit: 0 };
+  if (budget.limit > 0) {
+    const spent = budget.used >= budget.limit;
+    $("chips").innerHTML +=
+      `<span class="chip${spent ? " warn" : ""}" title="今日视觉模型调用次数 / 上限">` +
+      `识图<b>${budget.used}/${budget.limit}</b></span>`;
+  }
+  // 清单条数上限由后端给，避免前后端各写一份数字
+  if (data.manifest_limit) {
+    $("import-manifest").placeholder =
+      `https://…/list.json（数组或 {items:[…]}，最多 ${data.manifest_limit} 条）`;
+  }
 
   const options = $("filter-persona");
   const keep = options.value;
@@ -449,10 +465,51 @@ const bulkActions = {
   delete: Object.assign((ids) => api.post("delete", { ids }), { label: "删除" }),
 };
 
+/** 把 base64 的 zip 交给浏览器下载：受限 iframe 里只有这一条能落地成文件。 */
+function downloadBase64(name, base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  const blob = new Blob([bytes], { type: "application/zip" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = name;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+/** 导出选中：后端打包成 zip（只含图片），文件名是毫秒级时间戳。 */
+async function exportSelection(ids) {
+  const res = await guard(() => api.post("export/images", { ids }), "导出选中");
+  if (!res || !res.ok) {
+    toast((res && res.message) || "导出失败", true);
+    return;
+  }
+  if (!res.base64) {
+    toast("导出失败：响应里没有文件内容", true);
+    return;
+  }
+  downloadBase64(res.name, res.base64);
+  const skipped = Number(res.skipped) || 0;
+  toast(
+    `已导出 ${res.count} 张${skipped ? `，跳过 ${skipped} 张（文件缺失）` : ""}`,
+    skipped > 0,
+  );
+}
+
 async function runBulk(actionName) {
   const ids = Array.from(state.selected);
   if (!ids.length) return;
-    const isDestructive = actionName === "delete" || actionName === "ban";
+  if (actionName === "export") {
+    await exportSelection(ids);
+    return;
+  }
+  const isDestructive = actionName === "delete" || actionName === "ban";
     const needsConfirm =
       !confirmTwice(actionName, bulkActions[actionName].label || actionName);
     if (isDestructive && needsConfirm) {
@@ -672,6 +729,163 @@ async function saveEdit() {
   await Promise.all([loadStats(), loadList()]);
 }
 
+/** 弹层里的缩略图：与卡片共用 thumb API，失败只影响这一格。 */
+async function loadThumbInto(id, holder) {
+  try {
+    const res = await api.get("thumb", { id });
+    if (typeof res === "string" || !res || !res.ok || !res.image) return;
+    const image = new Image();
+    image.alt = `表情 ${id}`;
+    image.src = `data:${res.mime || "image/jpeg"};base64,${res.image}`;
+    holder.innerHTML = "";
+    holder.appendChild(image);
+  } catch (_) {
+    /* 静默：占位文案已经在 */
+  }
+}
+
+/** 试一试：输入一句话，看关键词路 / 向量路各自的 top 候选与原始分。 */
+async function runSearchPreview() {
+  const text = $("preview-input").value.trim();
+  const context = $("preview-context").value.trim();
+  const holder = $("preview-results");
+  if (!text) {
+    toast("先输入一句话", true);
+    return;
+  }
+  holder.innerHTML = '<p class="form-hint">查询中…</p>';
+  const res = await guard(
+    () => api.post("search/preview", { text, context_text: context }),
+    "检索预览",
+  );
+  if (!res || !res.ok) {
+    holder.innerHTML = "";
+    return;
+  }
+  const column = (title, rows, hint) => {
+    const body = rows && rows.length
+      ? rows
+          .map(
+            (row) =>
+              `<div class="result-row" data-thumb="${row.id}">` +
+              `<div class="result-thumb">…</div>` +
+              `<div class="result-meta">` +
+              `<b>#${row.id} · ${row.score}</b>` +
+              `<span class="badge">${escapeHtml(row.label)}</span>` +
+              `<p>${escapeHtml(row.caption)}</p>` +
+              (row.text_in_image
+                ? `<p class="pic-text">图上 ${escapeHtml(row.text_in_image)}</p>`
+                : "") +
+              `</div></div>`,
+          )
+          .join("")
+      : `<p class="form-hint">${hint}</p>`;
+    return `<div class="preview-col"><h3>${title}</h3>${body}</div>`;
+  };
+  holder.innerHTML =
+    column("关键词路", res.keyword, "没有候选") +
+    column(
+      `向量路${res.model ? `（${escapeHtml(res.model)}）` : ""}`,
+      res.vector,
+      res.vector === null ? "未启用或不可用" : "没有候选",
+    );
+  for (const row of holder.querySelectorAll(".result-row")) {
+    loadThumbInto(row.dataset.thumb, row.querySelector(".result-thumb"));
+  }
+}
+
+function openSearchPreview() {
+  openModal(
+    "试一试",
+    `<p class="form-hint">
+       输入一句机器人可能说的话（可选：用户当时说的话），看两条检索路各自的 top 候选与原始分。
+       调提示词、权重、阈值前后各跑一遍同一句话对比变化。不过闸、不记用量、不做多样性重排。
+     </p>
+     <div class="panel-row">
+       <label class="field grow"><span>机器人回复</span>
+         <input id="preview-input" placeholder="例如：今天这场雨下得也太大了" /></label>
+     </div>
+     <div class="panel-row">
+       <label class="field grow"><span>用户消息（可选，匹配场景词）</span>
+         <input id="preview-context" placeholder="例如：外卖到楼下了但我不想下去拿" /></label>
+       <button class="btn primary" id="preview-run" type="button">查询</button>
+     </div>
+     <div class="preview-cols" id="preview-results"></div>`,
+  );
+  $("preview-run").addEventListener("click", runSearchPreview);
+  $("preview-input").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") runSearchPreview();
+  });
+}
+
+const VIA_NAMES = { vector: "向量", keyword: "关键词", tool: "工具" };
+
+/** 发送记录：最近成功发送 + 拒发原因分布（调「为什么发了这张/一张没发」的地方）。 */
+/** 备份：生成 zip（数据库快照 + 图片），列表与删除；文件在部署端磁盘上，不走 HTTP 下载。 */
+async function openBackup() {
+  const res = await guard(() => api.get("export/list"), "备份列表");
+  if (!res || !res.ok) return;
+  renderBackupModal(res.exports || [], res.directory || "", res.keep || 0);
+}
+
+/** 渲染整块弹层并把两个按钮的监听一起挂上。
+ *
+ * 每次渲染都会换掉 DOM（openModal 覆盖 innerHTML），监听必须在这里重新挂——
+ * 挂在渲染外面的话，「生成一次」或「删一次」之后按钮就哑了。
+ */
+function renderBackupModal(exports, directory, keep) {
+  const rows = exports
+    .map(
+      (file) =>
+        `<div class="result-row export-row">` +
+        `<div class="result-meta"><b>${escapeHtml(file.name)}</b>` +
+        `<p>${new Date(file.mtime * 1000).toLocaleString()} · ` +
+        `${(file.size / 1048576).toFixed(1)} MB</p></div>` +
+        `<button class="btn small danger" data-export-del="${escapeHtml(file.name)}" ` +
+        `type="button">删除</button></div>`,
+    )
+    .join("") || '<p class="form-hint">还没有备份</p>';
+  const keepText = keep > 0 ? `只保留最近 ${keep} 份，更旧的自动清理。` : "";
+  openModal(
+    "备份",
+    `<p class="form-hint">
+       生成一份完整备份（数据库快照 + 图片），zip 保存在部署端：
+       <code>${escapeHtml(directory)}</code>。${keepText}
+       页面不提供大文件下载，请到上述目录取走。
+     </p>
+     <div class="panel-row">
+       <button class="btn primary" id="backup-create" type="button">生成新备份</button>
+     </div>
+     ${rows}`,
+  );
+
+  const create = $("backup-create");
+  create.addEventListener("click", async () => {
+    create.disabled = true;
+    create.textContent = "打包中…";
+    const created = await guard(() => api.post("export", {}), "生成备份");
+    // 不论成功失败都按最新列表重渲染：失败时也要把按钮恢复成可点状态
+    const listed = created && created.ok
+      ? created
+      : await guard(() => api.get("export/list"), "备份列表");
+    if (!listed || !listed.ok) return;
+    if (created && created.ok) {
+      toast(`备份完成：${created.name}（${Math.round(created.size / 1048576)} MB）`);
+    }
+    renderBackupModal(listed.exports || [], listed.directory || directory, listed.keep || keep);
+  });
+
+  for (const button of document.querySelectorAll("[data-export-del]")) {
+    button.addEventListener("click", async () => {
+      const name = button.dataset.exportDel;
+      if (!confirmTwice(`export-${name}`, `删除 ${name}`)) return;
+      const res = await guard(() => api.post("export/delete", { name }), "删除备份");
+      if (!res || !res.ok) return;
+      renderBackupModal(res.exports || [], directory, res.keep || keep);
+    });
+  }
+}
+
 /** 弹层里的人格草稿：一个列表三种状态，避免可用/禁用两份同样的长列表。 */
 let personaDraft = { generic: false, allow: new Set(), block: new Set() };
 
@@ -778,6 +992,34 @@ async function bindPersona() {
 /* ---------- 导入 ---------- */
 
 const MAX_IMPORT_URLS = 20;
+
+/** 清单导入：一次拉一份 JSON，把里面的图片 URL 整批入队。 */
+async function doImportManifest() {
+  const url = $("import-manifest").value.trim();
+  if (!url) {
+    toast("先填清单 URL", true);
+    return;
+  }
+  const res = await guard(
+    () => api.post("import/manifest", { url, ...importParams() }),
+    "导入清单",
+  );
+  if (!res || !res.ok) {
+    toast((res && res.message) || "清单导入失败", true);
+    return;
+  }
+  if (res.outcome === "rejected") {
+    toast(`清单地址不可用（${res.reason || "rejected"}）`, true);
+    return;
+  }
+  $("import-manifest").value = "";
+  toast(
+    `已入队 ${res.queued} 条` +
+      (res.dropped ? `，${res.dropped} 条因队列已满被丢弃` : "") +
+      `（清单共 ${res.total} 条）`,
+  );
+  await loadStats();
+}
 
 async function doImportUrls() {
   let urls = $("import-urls").value
@@ -1055,6 +1297,9 @@ function bindEvents() {
     });
   }
 
+  $("search-preview").addEventListener("click", openSearchPreview);
+  $("backup-panel").addEventListener("click", openBackup);
+
   $("bulk-label").addEventListener("change", async () => {
     const label = $("bulk-label").value;
     const ids = Array.from(state.selected);
@@ -1213,6 +1458,7 @@ function bindEvents() {
     $("import-panel").hidden = !$("import-panel").hidden;
   });
   $("do-import").addEventListener("click", doImportUrls);
+  $("do-import-manifest").addEventListener("click", doImportManifest);
   // 选文件只记下来，点「上传所选」才真正传——避免误选一张就直接开始上传
   $("import-files").addEventListener("change", (event) => {
     const files = event.target.files;
@@ -1257,12 +1503,25 @@ function bindEvents() {
 
 async function init() {
   if (!bridge) {
+    // 宿主把 bridge-sdk.js 插在 </body> 前；万一顺序变了，等 load 再取一次
+    await new Promise((resolve) => {
+      if (document.readyState === "complete") resolve(undefined);
+      else window.addEventListener("load", () => resolve(undefined), { once: true });
+    });
+  }
+  if (!window.AstrBotPluginPage) {
     document.body.innerHTML = '<p style="padding:24px">bridge 未加载，请从 AstrBot 插件页打开。</p>';
     return;
   }
   await bridge.ready();
   $("page-title").textContent = bridge.t("pages.manager.title", "表情窝");
-  $("page-sub").textContent = bridge.t("pages.manager.description", "收集、审核、拉黑、导入，全在这里");
+  // 副标题由当前视图决定（overview.js 的 switchView 负责），这里只在管理视图里兜底
+  if (document.body.dataset.view === "manager") {
+    $("page-sub").textContent = bridge.t(
+      "pages.manager.description",
+      "收集、审核、拉黑、导入，全在这里",
+    );
+  }
   state.size = Number($("page-size").value) || 12;
   fillLabelSelects();
   bindEvents();
@@ -1270,3 +1529,19 @@ async function init() {
 }
 
 init();
+
+// 大盘视图（overview.js）复用这些 helper。用 window 传递而不是 import：
+// 宿主会按 URL 重写 import 说明符，而脚本 src 带 ?v=，两者 URL 不同会让本文件
+// 被当成两个模块各执行一遍（事件重复绑定、接口重复请求）。
+window.__memenest = {
+  $,
+  api,
+  toast,
+  guard,
+  escapeHtml,
+  LABELS,
+  VIA_NAMES,
+  loadThumbInto,
+  openModal,
+  closeModal,
+};

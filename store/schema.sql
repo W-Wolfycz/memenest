@@ -1,5 +1,6 @@
--- 表情窝 · 库结构（schema_version = 1，与 store.py 的 SCHEMA_VERSION 对应）
+-- 表情窝 · 库结构（schema_version = 2，与 store.py 的 SCHEMA_VERSION 对应）
 -- 约定：rel_path 相对插件数据目录，正斜杠分隔；所有时间列为 Unix 秒。
+-- 老库升级走 store.initialize 的逐级迁移（只加表/列），不要求删库重建。
 
 CREATE TABLE IF NOT EXISTS memo (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
