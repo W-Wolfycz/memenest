@@ -33,12 +33,23 @@ from ..domain import (
     Stats,
 )
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "4"
 PERCEPT_SCAN_LIMIT = 2000
 MAX_PAGE_SIZE = 50
 MAX_CANDIDATES = 2000
 
+SEND_LOG_DAYS = 90
+SEND_LOG_MAX = 20000
+"""发送历史的保留窗口：按天数与条数双约束，谁先到就按谁裁。
+
+90 天覆盖「上周/上个月为什么发了这张」这类排查；20000 条是体积兜底
+（一行约 180 B，加上索引约 5 MB）。刻意不做成配置项：用户答不出保留多少条，
+多一个键就多一份文档与排查面。"""
+SEND_LOG_PRUNE_EVERY = 50
+"""每写这么多次顺手裁一次，省掉独立定时任务。"""
+
 _NEW_COLUMNS: dict[int, dict[str, dict[str, str]]] = {
+    4: {"send_log": {"detail": "TEXT"}},
     # 版本 → 表 → {列: 类型}。加列走这里，`_ensure_column` 会先查 PRAGMA 再 ALTER，
     # 已经存在的列不会被重复添加；建表用 schema.sql 的 IF NOT EXISTS 即可。
     # v2：人格禁用名单改成独立表，没有新增列。
@@ -865,6 +876,96 @@ class MemoStore:
             if len(bucket) < keep:
                 bucket.append(int(row["id"]))
         return {label: tuple(ids) for label, ids in buckets.items()}
+
+    # -- 发送历史 ---------------------------------------------------------
+
+    def add_send_log(
+        self,
+        *,
+        created_at: int,
+        umo: str | None,
+        memo_id: int | None,
+        via: str,
+        label: str,
+        text: str,
+        outcome: str,
+        detail: str = "",
+    ) -> None:
+        """记一条发送（成功/失败/取消）。
+
+        `detail` 只放**失败原因**：异常类型名、`platform_unavailable`、`file_missing`
+        之类；不放聊天内容，也不放原始异常串（那是日志的事）。
+
+        写失败不能影响发送本身：这里只向上抛 sqlite3.Error，由调用方决定记 WARNING。
+        """
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO send_log(created_at, umo, memo_id, via, label, text, outcome, "
+                "detail) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                (created_at, umo, memo_id, via, label, (text or "")[:200], outcome, detail),
+            )
+        writes = getattr(self, "_send_log_writes", 0) + 1
+        self._send_log_writes = writes
+        if writes % SEND_LOG_PRUNE_EVERY == 0:
+            self.prune_send_logs(created_at)
+
+    def page_send_logs(
+        self,
+        *,
+        page: int = 1,
+        size: int = 20,
+        via: str = "",
+        query: str = "",
+    ) -> tuple[list[dict], int]:
+        """分页读发送历史（新→旧）；via / query 为空表示不筛。"""
+        size = max(1, min(MAX_PAGE_SIZE, int(size or 20)))
+        page = max(1, int(page or 1))
+        where: list[str] = []
+        params: list[Any] = []
+        if via:
+            where.append("via = ?")
+            params.append(via)
+        term = (query or "").strip()
+        if term:
+            where.append("(text LIKE ? OR label LIKE ?)")
+            params.extend([f"%{term}%", f"%{term}%"])
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        with self._connect() as conn:
+            total = int(
+                conn.execute(f"SELECT COUNT(*) AS n FROM send_log{clause}", params).fetchone()["n"]
+            )
+            rows = conn.execute(
+                f"SELECT created_at, umo, memo_id, via, label, text, outcome, detail "
+                f"FROM send_log{clause} ORDER BY id DESC LIMIT ? OFFSET ?",
+                [*params, size, (page - 1) * size],
+            ).fetchall()
+        return [dict(row) for row in rows], total
+
+    def prune_send_logs(
+        self,
+        now: int,
+        *,
+        days: int = SEND_LOG_DAYS,
+        keep: int = SEND_LOG_MAX,
+    ) -> int:
+        """按「超期」与「超量」两条规则裁剪，返回删掉的行数。"""
+        cutoff = int(now) - max(1, int(days)) * 86400
+        with self._connect() as conn:
+            expired = conn.execute(
+                "DELETE FROM send_log WHERE created_at < ?", (cutoff,)
+            ).rowcount
+            overflow = conn.execute(
+                "DELETE FROM send_log WHERE id <= ("
+                "  SELECT id FROM send_log ORDER BY id DESC LIMIT 1 OFFSET ?"
+                ")",
+                (max(1, int(keep)),),
+            ).rowcount
+        removed = expired + overflow
+        if removed:
+            logger.info(
+                "发送历史裁剪 removed=%s（超期 %s / 超量 %s）", removed, expired, overflow
+            )
+        return removed
 
     def count_state(self, state: str) -> int:
         """某个状态下的条数（待审核池护栏用，走索引，不做全表装配）。"""

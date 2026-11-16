@@ -144,17 +144,29 @@ function renderVector(vector) {
   const enabled = Boolean(vector && vector.enabled);
   const covered = Number(vector && vector.covered) || 0;
   const expected = Number(vector && vector.expected) || 0;
-  $("ov-vector-rows").innerHTML = enabled
-    ? [
-        row("状态", vector.running ? "重建中" : "就绪", vector.running ? "hot" : "ok"),
-        row("覆盖", `${covered} / ${expected}`, covered < expected ? "hot" : ""),
-        row("模型", vector.model || "—", "muted"),
-      ].join("")
-    : row("语义检索", "未启用", "muted");
-  $("ov-vector-note").textContent = enabled
+  const missing = expected > covered;
+  if (!enabled) {
+    $("ov-vector-rows").innerHTML = row("语义检索", "未启用", "muted");
+    $("ov-vector-note").textContent = "未启用语义检索：现在按关键词打分。";
+    return;
+  }
+  // 只有缺向量时才给「补齐」，并把按钮放在数字前面：不满的那几个数字才是它的理由
+  const fill = missing
+    ? '<button class="btn small ov-inline-btn" id="ov-reindex" type="button"' +
+      ' title="只给还没有向量的条目补算">补齐</button>'
+    : "";
+  $("ov-vector-rows").innerHTML = [
+    row("状态", vector.running ? "重建中" : "就绪", vector.running ? "hot" : "ok"),
+    `<div class="ov-row"><span>覆盖</span><span class="ov-row-tail">${fill}` +
+      `<b class="${missing ? "hot" : ""}">${covered} / ${expected}</b></span></div>`,
+    row("模型", vector.model || "—", "muted"),
+  ].join("");
+  $("ov-vector-note").textContent = missing
     ? "覆盖不到 100% 时，部分图只能靠关键词命中。"
-    : "未启用语义检索：现在按关键词打分。";
-  $("ov-reindex").hidden = !enabled;
+    : "全部条目都有向量，检索走语义。";
+  const button = $("ov-reindex");
+  // 每次渲染都是新 DOM，监听得在这里重挂
+  if (button) button.addEventListener("click", doReindex);
 }
 
 function renderStorage(storage) {
@@ -201,7 +213,8 @@ function renderSend(send) {
     .slice(0, 6)
     .map(([code, count]) => `<span class="ov-badge">${escapeHtml(code)} ×${count}</span>`)
     .join("");
-  $("ov-send-reject").innerHTML = entries;
+  $("ov-send-reject").innerHTML =
+    entries || '<span class="hint">本次运行还没有被拦下的记录</span>';
 }
 
 function renderLabels(labels) {
@@ -400,13 +413,15 @@ async function doReindex() {
 const SUB_TEXT = {
   overview: "库况、识图、检索、存储、发送，一屏看完",
   manager: "收集、审核、拉黑、导入，全在这里",
+  history: "发过什么、走的哪条路、有没有发出去",
 };
 
 function switchView(view) {
-  const target = view === "manager" ? "manager" : "overview";
+  const target = ["manager", "history"].includes(view) ? view : "overview";
   document.body.dataset.view = target;
   $("view-overview").hidden = target !== "overview";
   $("view-manager").hidden = target !== "manager";
+  $("view-history").hidden = target !== "history";
   for (const tab of document.querySelectorAll(".tab")) {
     const active = tab.dataset.view === target;
     tab.classList.toggle("is-active", active);
@@ -414,6 +429,7 @@ function switchView(view) {
   }
   $("page-sub").textContent = SUB_TEXT[target];
   if (target === "overview") void loadOverview();
+  if (target === "history") window.__memenestHistory?.open();
 }
 
 function bindEvents() {
@@ -421,12 +437,12 @@ function bindEvents() {
     tab.addEventListener("click", () => switchView(tab.dataset.view));
   }
   $("ov-refresh").addEventListener("click", () => loadOverview());
+  $("ov-goto-history").addEventListener("click", () => switchView("history"));
   $("ov-drop-missing").addEventListener("click", doDropMissing);
   $("ov-reanalyze").addEventListener("click", doReanalyze);
   $("ov-integrity").addEventListener("click", openIntegrity);
   $("ov-vacuum").addEventListener("click", doVacuum);
   $("ov-orphans").addEventListener("click", doOrphans);
-  $("ov-reindex").addEventListener("click", doReindex);
 }
 
 async function initOverview() {

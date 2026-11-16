@@ -7,7 +7,7 @@ import sqlite3
 import pytest
 
 from memenest.domain import STATE_READY, Analysis, Draft
-from memenest.store import MemoStore, StoreError
+from memenest.store import SCHEMA_VERSION, MemoStore, StoreError
 
 
 def _draft(rel_path: str, *, state: str = STATE_READY, persona: str | None = None) -> Draft:
@@ -68,7 +68,19 @@ def test_old_database_is_migrated_in_place(tmp_path):
     store.initialize()
     try:
         assert store.get(memo_id) is not None, "升级不能丢数据"
-        assert _version(db_path) == "2"
+        assert _version(db_path) == SCHEMA_VERSION, "版本要抬到插件当前的结构版本"
+        # v3 才有的发送历史表：老库升级后必须能直接写，否则「历史」在新老库上都不可用
+        store.add_send_log(
+            created_at=1,
+            umo=None,
+            memo_id=memo_id,
+            via="vector",
+            label="joy",
+            text="demo",
+            outcome="sent",
+        )
+        rows, total = store.page_send_logs()
+        assert total == 1 and rows[0]["via"] == "vector"
     finally:
         store.close()
 

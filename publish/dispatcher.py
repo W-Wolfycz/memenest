@@ -422,9 +422,11 @@ class Dispatcher:
             return FireOutcome(Reason.PERSONA_DENIED)
         path = await self._prepare_path(memo)
         if path is None:
+            self._note_send(umo, memo, "", VIA_TOOL, outcome="missing", detail="file_missing")
             return FireOutcome(Reason.FILE_MISSING)
-        ok = await self._deliver(umo, path)
+        ok, detail = await self._deliver_with_reason(umo, path)
         if not ok:
+            self._note_send(umo, memo, "", VIA_TOOL, outcome="failed", detail=detail)
             return FireOutcome(Reason.SEND_FAILED)
         # 工具发送也要进发送记录：面板问的是「最近发过什么」，漏掉工具那一路
         # 会让人以为只有自动发送在用图。
@@ -434,6 +436,17 @@ class Dispatcher:
         return FireOutcome(Reason.OK, memo=memo)
 
     # -- 发送前处理 -------------------------------------------------------
+
+    async def _deliver_with_reason(self, umo: str, path: Path) -> tuple[bool, str]:
+        """调用注入的投递回调，返回 (是否成功, 失败原因)。
+
+        回调允许返回 `(ok, detail)` 或旧式 `bool`：前者能带上异常类型名
+        （发送历史要显示「为什么没发出去」），后者兼容测试与第三方注入。
+        """
+        result = await self._deliver(umo, path)
+        if isinstance(result, tuple):
+            return bool(result[0]), str(result[1] or "")
+        return bool(result), ""
 
     async def _prepare_path(self, memo: Memo) -> Path | None:
         """原图不存在 → None；压缩失败 → 原图。"""
@@ -729,16 +742,19 @@ class Dispatcher:
             raise
         if state.cancelled or self._closed:
             self.stats.cancelled += 1
+            self._note_send(umo, memo, trigger_text, via, outcome="cancelled", detail="cancelled")
             return
         path = await self._prepare_path(memo)
         if path is None:
             self.stats.failed += 1
             self._log.debug("[MemeNest] 发送放弃 reason=%s id=%s", Reason.FILE_MISSING, memo.id)
+            self._note_send(umo, memo, trigger_text, via, outcome="missing", detail="file_missing")
             return
-        ok = await self._deliver(umo, path)
+        ok, detail = await self._deliver_with_reason(umo, path)
         if not ok:
             self.stats.failed += 1
             self._log.debug("[MemeNest] 发送失败 reason=%s id=%s", Reason.SEND_FAILED, memo.id)
+            self._note_send(umo, memo, trigger_text, via, outcome="failed", detail=detail)
             return
         self.stats.sent += 1
         self._note_send(umo, memo, trigger_text, via)
@@ -826,18 +842,50 @@ class Dispatcher:
 
     # -- 发送观测（面板「发送记录」弹层的数据源） --------------------------
 
-    def _note_send(self, umo: str, memo: Memo, trigger_text: str, via: str) -> None:
-        self._recent_sends.append(
-            {
-                "time": int(self._clock()),
-                "umo": umo,
-                "memo_id": memo.id,
-                "label": memo.label,
-                "caption": memo.caption[:40],
-                "text": (trigger_text or "")[:60],
-                "via": via,
-            }
-        )
+    def _note_send(
+        self,
+        umo: str,
+        memo: Memo,
+        trigger_text: str,
+        via: str,
+        *,
+        outcome: str = "sent",
+        detail: str = "",
+    ) -> None:
+        """记一次发送：成功进内存环形（面板即时看），全部落库（发送历史）。
+
+        写历史失败只记 WARNING：发图已经成功了，不能因为记账失败把它退回去。
+        """
+        now = int(self._clock())
+        if outcome == "sent":
+            self._recent_sends.append(
+                {
+                    "time": now,
+                    "umo": umo,
+                    "memo_id": memo.id,
+                    "label": memo.label,
+                    "caption": memo.caption[:40],
+                    "text": (trigger_text or "")[:60],
+                    "via": via,
+                }
+            )
+        try:
+            self.store.add_send_log(
+                created_at=now,
+                umo=umo,
+                memo_id=memo.id,
+                via=via,
+                label=memo.label,
+                text=trigger_text or "",
+                outcome=outcome,
+                detail=detail,
+            )
+        except Exception as exc:
+            self._log.warning(
+                "[MemeNest] 写发送历史失败 outcome=%s type=%s",
+                outcome,
+                type(exc).__name__,
+            )
 
     def recent_sends(self) -> list[dict]:
         """最近的发送记录（新→旧，面板直接按顺序渲染）。"""

@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>表情窝</title>
-    <link rel="stylesheet" href="./style.css?v=20261116a" />
-    <link rel="stylesheet" href="./overview.css?v=20261116a" />
+    <link rel="stylesheet" href="./style.css?v=20261116g" />
+    <link rel="stylesheet" href="./overview.css?v=20261116g" />
   </head>
   <body data-view="overview">
     <header class="top">
@@ -17,6 +17,8 @@
             type="button" role="tab" aria-selected="true">大盘</button>
           <button class="tab" id="tab-manager" data-view="manager"
             type="button" role="tab" aria-selected="false">表情管理</button>
+          <button class="tab" id="tab-history" data-view="history"
+            type="button" role="tab" aria-selected="false">发送历史</button>
         </nav>
       </div>
       <div class="chips" id="chips"></div>
@@ -67,9 +69,6 @@
           <h2>检索</h2>
           <div class="ov-rows" id="ov-vector-rows"></div>
           <p class="hint" id="ov-vector-note"></p>
-          <div class="ov-actions">
-            <button class="btn small" id="ov-reindex" type="button">补齐向量</button>
-          </div>
         </section>
       </div>
 
@@ -82,6 +81,7 @@
         <section class="ov-block">
           <h2>发送</h2>
           <div class="ov-rows" id="ov-send-rows"></div>
+          <p class="hint ov-reject-label">拒发分布 · 本次运行（重载清零）</p>
           <div class="ov-badges" id="ov-send-reject"></div>
         </section>
 
@@ -119,10 +119,50 @@
           <div class="ov-rows" id="ov-origin-grid"></div>
         </section>
         <section class="ov-block">
-          <h2>最近发送</h2>
+          <h2>最近发送<span class="hint"> · 全部记录见「发送历史」</span></h2>
           <div class="ov-sends" id="ov-recent-sends"></div>
+          <button class="ov-link" id="ov-goto-history" type="button">查看全部 →</button>
         </section>
       </div>
+    </section>
+
+    <!-- ============ 发送历史 ============ -->
+    <section id="view-history" hidden>
+      <section class="toolbar">
+        <label class="field">
+          <span>检索路</span>
+          <select id="history-via">
+            <option value="">全部</option>
+            <option value="vector">向量</option>
+            <option value="keyword">关键词</option>
+            <option value="tool">工具</option>
+          </select>
+        </label>
+        <label class="field grow">
+          <span>搜索</span>
+          <input id="history-q" type="search" placeholder="搜触发文本或分类" />
+        </label>
+        <label class="field">
+          <span>每页</span>
+          <select id="history-size">
+            <option value="20">20</option>
+            <option value="40">40</option>
+          </select>
+        </label>
+        <button class="btn primary" id="history-search" type="button">查询</button>
+        <button class="btn ghost" id="history-refresh" type="button">刷新</button>
+      </section>
+
+      <div class="ov-history-hint" id="history-hint"></div>
+      <div class="ov-sends ov-history-list" id="history-list"></div>
+
+      <footer class="pager">
+        <button class="btn ghost" id="history-first" type="button">首页</button>
+        <button class="btn ghost" id="history-prev" type="button">上一页</button>
+        <span id="history-page-info" class="hint"></span>
+        <button class="btn ghost" id="history-next" type="button">下一页</button>
+        <button class="btn ghost" id="history-last" type="button">末页</button>
+      </footer>
     </section>
 
     <!-- ============ 表情管理 ============ -->
@@ -292,7 +332,8 @@
       <div class="modal-panel" id="modal-panel" role="dialog" aria-modal="true"></div>
     </div>
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
-    <script type="module" src="./app.js?v=20261116a"></script>
-    <script type="module" src="./overview.js?v=20261116a"></script>
+    <script type="module" src="./app.js?v=20261116g"></script>
+    <script type="module" src="./overview.js?v=20261116g"></script>
+    <script type="module" src="./history.js?v=20261116g"></script>
   </body>
 </html>

@@ -1469,19 +1469,20 @@ input[type="checkbox"] {
 
 .tabs {
   display: flex;
-  gap: 2px;
-  margin-top: 10px;
+  gap: 12px;
+  margin-top: 12px;
 }
 
 .tab {
-  padding: 4px 14px;
+  padding: 7px 18px;
   border: 1px solid transparent;
-  border-radius: 999px;
+  border-radius: 6px;
   background: transparent;
   color: var(--muted);
-  font: 500 12px/1.4 var(--font-ui);
-  letter-spacing: 0.06em;
+  font: 500 12.5px/1.3 var(--font-ui);
+  letter-spacing: 0.08em;
   cursor: pointer;
+  transition: box-shadow 0.15s ease-out, transform 0.15s ease-out, color 0.15s ease-out;
 }
 
 .tab:hover {
@@ -1494,17 +1495,14 @@ input[type="checkbox"] {
   color: var(--ink);
 }
 
-/* 大盘视图里不显示只属于管理视图的头部块 */
-body[data-view="overview"] #chips,
-body[data-view="overview"] #quick-index,
-body[data-view="overview"] .quick-state {
+/* 头部这些只属于「表情管理」视图：大盘与发送历史各有自己的工具条 */
+body:not([data-view="manager"]) #chips,
+body:not([data-view="manager"]) #quick-index,
+body:not([data-view="manager"]) .quick-state,
+body:not([data-view="manager"]) #refresh {
   display: none;
 }
 
-/* 大盘视图自己有「刷新大盘」，管理页的刷新按钮在大盘里没有意义 */
-body[data-view="overview"] #refresh {
-  display: none;
-}
 
 /* 标签页需要看起来能点：未选中有细边框与投影，选中后压平并加重文字 */
 .tab {

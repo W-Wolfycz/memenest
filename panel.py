@@ -22,6 +22,7 @@ from astrbot.api.web import PluginUploadFile, json_response, request
 from . import backup
 from . import panel_core as core
 from .config import PLUGIN_NAME
+from .store import SEND_LOG_DAYS, SEND_LOG_MAX
 from .domain import (
     GENERIC_PERSONA,
     LABEL_KEYS,
@@ -106,6 +107,7 @@ class PanelApi:
             ("integrity/orphans", self.handle_integrity_orphans, ["POST"], "MemeNest 清理孤儿文件"),
             ("integrity/missing", self.handle_integrity_missing, ["POST"], "MemeNest 删除缺失记录"),
             ("export/images", self.handle_export_images, ["POST"], "MemeNest 导出选中图片"),
+            ("sends/history", self.handle_sends_history, ["GET"], "MemeNest 发送历史"),
             ("reindex", self.handle_reindex, ["POST"], "MemeNest 向量索引"),
             ("import/process", self.handle_import_process, ["POST"], "MemeNest 处理已上传文件"),
             ("import/file", self.handle_import_file, ["POST"], "MemeNest 文件导入"),
@@ -338,8 +340,7 @@ class PanelApi:
         return json_response({"ok": True, "started": True, "scope": scope})
 
     async def handle_reanalyze_state(self) -> Any:
-        params = await request.query()
-        scope = str(params.get("scope") or "empty")
+        scope = str(request.query.get("scope") or "empty")
         return json_response({"ok": True, **self.plugin.reanalyze_state(scope)})
 
     async def handle_stats(self) -> Any:
@@ -921,6 +922,33 @@ class PanelApi:
         )
         return json_response(
             {"ok": True, "exports": items, "keep": backup.EXPORT_KEEP}
+        )
+
+    async def handle_sends_history(self) -> Any:
+        """发送历史（持久化）：分页 + 按检索路筛选 + 搜触发文本。"""
+        page = max(1, core._as_int(request.query.get("page"), 1))
+        size = max(
+            1, min(core.PAGE_SIZE_MAX, core._as_int(request.query.get("size"), 20))
+        )
+        via = str(request.query.get("via") or "").strip()
+        query = str(request.query.get("q") or "").strip()
+        items, total = await asyncio.to_thread(
+            self.plugin.store.page_send_logs,
+            page=page,
+            size=size,
+            via=via,
+            query=query,
+        )
+        return json_response(
+            {
+                "ok": True,
+                "items": items,
+                "total": total,
+                "page": page,
+                "size": size,
+                "days": SEND_LOG_DAYS,
+                "keep": SEND_LOG_MAX,
+            }
         )
 
     async def handle_search_preview(self) -> Any:

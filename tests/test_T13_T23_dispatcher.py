@@ -65,7 +65,7 @@ async def _wait_until(predicate, timeout: float = 2.0) -> bool:
     return predicate()
 
 
-def _dispatcher(store, data_dir, delivered: list, **overrides) -> Dispatcher:
+def _dispatcher(store, data_dir, delivered: list, *, deliver_fn=None, **overrides) -> Dispatcher:
     base = {
         "send_ratio": 1.0,
         "send_delay_seconds": 0,
@@ -81,6 +81,9 @@ def _dispatcher(store, data_dir, delivered: list, **overrides) -> Dispatcher:
     async def deliver(umo: str, path) -> bool:
         delivered.append((umo, path))
         return True
+
+    if deliver_fn is not None:
+        deliver = deliver_fn
 
     return Dispatcher(
         store=store,
@@ -113,6 +116,53 @@ async def test_T14_T16_two_hook_calls_fire_only_once(tmp_path):
         await dispatcher.shutdown()
         store.close()
 
+
+
+@pytest.mark.asyncio
+async def test_send_is_recorded_to_history(tmp_path):
+    """守住「发了但没落库」：只在内存里的话，重载插件后排查就没了依据。"""
+    store, data_dir, _ = _setup(tmp_path)
+    delivered: list = []
+    dispatcher = _dispatcher(store, data_dir, delivered)
+    try:
+        await dispatcher.fire(umo=UMO, text=LONG_TEXT, reply_has_image=False)
+        assert await _wait_until(lambda: bool(delivered), timeout=2.0) is True
+        assert await _wait_until(
+            lambda: store.page_send_logs()[1] == 1, timeout=2.0
+        ) is True, "发送历史必须落库"
+        items, total = store.page_send_logs()
+        assert total == 1
+        assert items[0]["outcome"] == "sent"
+        assert items[0]["via"] in ("vector", "keyword")
+        # 标签必须是这张图真正的分类（写成固定的 "other" 就等于没记）
+        memo = store.get(items[0]["memo_id"])
+        assert memo is not None
+        assert items[0]["label"] == memo.label == "joy"
+    finally:
+        await dispatcher.shutdown()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_send_records_error_type(tmp_path):
+    """历史里的失败必须带原因（异常类型名）：只写「失败」两个字等于没记。"""
+    store, data_dir, _ = _setup(tmp_path)
+
+    async def failing_deliver(umo: str, path):
+        return False, "TimeoutError"
+
+    dispatcher = _dispatcher(store, data_dir, [], deliver_fn=failing_deliver)
+    try:
+        await dispatcher.fire(umo=UMO, text=LONG_TEXT, reply_has_image=False)
+        assert await _wait_until(
+            lambda: store.page_send_logs()[1] == 1, timeout=2.0
+        ) is True, "失败的发送也要进历史"
+        items, _ = store.page_send_logs()
+        assert items[0]["outcome"] == "failed"
+        assert items[0]["detail"] == "TimeoutError", "失败原因要落库，否则排查只能翻日志"
+    finally:
+        await dispatcher.shutdown()
+        store.close()
 
 @pytest.mark.asyncio
 async def test_T23_shutdown_cancels_pending_and_refuses_new_work(tmp_path):

@@ -192,8 +192,8 @@
           "llm"
         ],
         "labels": [
-          "标签向量",
-          "LLM 萃取"
+          "Vector",
+          "LLM"
         ]
       },
       "min_keyword_score": {
@@ -217,9 +217,9 @@
           "lively"
         ],
         "labels": [
-          "稳一点",
-          "适中",
-          "活泼"
+          "Stable",
+          "Balanced",
+          "Lively"
         ],
         "default": "balanced",
         "hint": "同一句话连发几次，要不要换张图。选「稳一点」基本老发同一张，「活泼」会常换——但换的也都是分数接近的，不会发不相关的。"

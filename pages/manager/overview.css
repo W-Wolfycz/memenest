@@ -399,3 +399,63 @@
 .ov-alerts[hidden] {
   display: none;
 }
+
+/* ---------- 发送历史 ---------- */
+
+/* 与大盘同样的 34px 版心内缩：列表不要贴着两侧边框 */
+#view-history {
+  padding: 4px 34px 40px;
+}
+
+/* 工具条自己已有 34px 内缩，这里交给容器统一处理 */
+#view-history .toolbar {
+  padding: 0 0 16px;
+}
+
+.ov-history-hint {
+  padding: 12px 2px 6px;
+  color: var(--muted);
+  font: 400 11.5px/1.6 var(--font-ui);
+}
+
+.ov-history-list {
+  margin-top: 2px;
+  padding: 0 2px;
+}
+
+.ov-history-list .ov-send {
+  padding: 11px 6px;
+}
+
+#view-history .pager {
+  margin-top: 20px;
+}
+
+.ov-send-src {
+  margin-left: auto;
+  color: var(--muted);
+  font: 400 11px/1.4 var(--font-mono);
+  white-space: nowrap;
+}
+
+.ov-badge.hot {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+/* 拒发分布的小标题：固定在徽标上方，空数据时也给一句说明 */
+.ov-reject-label {
+  margin: 8px 0 0;
+}
+
+/* 覆盖行里的「补齐」：贴着数字左侧，只在不满时出现 */
+.ov-row-tail {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ov-inline-btn {
+  padding: 2px 9px;
+  font-size: 11px;
+}

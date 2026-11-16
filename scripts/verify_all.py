@@ -332,6 +332,76 @@ def check_end_to_end() -> None:
     record(ok, "端到端上传处理", detail_text)
 
 
+
+# ------------------------------------------------- 10. 宿主 API 用法陷阱
+def check_host_api_usage() -> None:
+    """`request.query` 在宿主里是属性（MultiDict），写成 `await request.query()` 会 500。
+
+    这个错误只有真跑到那个接口才会暴露（页面点进去才炸），静态查一下最省事。
+    """
+    source = PLUGIN_PY.read_text(encoding="utf-8")
+    bad = source.count("await request.query(")
+    record(
+        bad == 0,
+        "request.query 用法正确",
+        f"{bad} 处把属性当方法调用" if bad else "全部按属性访问",
+    )
+
+
+# ------------------------------------------ 9.5 跨模块属性名
+def _module_level_names(path: pathlib.Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".")[0])
+    return names
+
+
+def check_module_attrs() -> None:
+    """`core.X` / `backup.X` 这类跨模块属性必须真的存在。
+
+    `core.MAX_PAGE_SIZE`（实际叫 PAGE_SIZE_MAX）这种写错名字的调用，
+    symtable 查不出（那是「未定义的名字」），只有真点到那个接口才 500。
+    """
+    targets = {
+        "core": ROOT / "panel_core.py",
+        "panel_core": ROOT / "panel_core.py",
+        "backup": ROOT / "backup.py",
+    }
+    available = {alias: _module_level_names(path) for alias, path in targets.items()}
+    tree = ast.parse(PLUGIN_PY.read_text(encoding="utf-8"))
+    used: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            alias = node.value.id
+            if alias in available:
+                used.setdefault(alias, set()).add(node.attr)
+    problems = [
+        f"{alias}.{name}"
+        for alias, names in used.items()
+        for name in sorted(names)
+        if name not in available[alias]
+    ]
+    total = sum(len(names) for names in used.values())
+    record(
+        not problems,
+        "跨模块属性都存在",
+        f"不存在：{problems}" if problems else f"{total} 个引用全部命中",
+    )
+
 # ---------------------------------------------------------- 8. 前端语法
 def check_js() -> None:
     node = pathlib.Path(
@@ -380,6 +450,8 @@ def main() -> int:
     check_host_routes()
     check_end_to_end()
     check_js()
+    check_host_api_usage()
+    check_module_attrs()
     check_deploy()
     print("=" * 70)
 

@@ -566,6 +566,48 @@ MUTATIONS: list[tuple[str, str, str | list[str], str | list[str], str]] = [
         'return f"{now:%Y-%m-%dT%H:%M:%S}_{now.microsecond // 1000:03d}.zip"',
         "tests/test_export_selection.py::test_selection_name_is_filesystem_safe_with_millis",
     ),
+    (
+        "发送历史倒序写反（最新记录被排到最后）",
+        "store/store.py",
+        'f"FROM send_log{clause} ORDER BY id DESC LIMIT ? OFFSET ?"',
+        'f"FROM send_log{clause} ORDER BY id ASC LIMIT ? OFFSET ?"',
+        "tests/test_send_history.py::test_history_is_newest_first_and_filterable",
+    ),
+    (
+        "发送历史超量裁剪删最新（留下最老的）",
+        "store/store.py",
+        '"  SELECT id FROM send_log ORDER BY id DESC LIMIT 1 OFFSET ?"',
+        '"  SELECT id FROM send_log ORDER BY id ASC LIMIT 1 OFFSET ?"',
+        "tests/test_send_history.py::test_overflow_prunes_oldest_keeps_newest",
+    ),
+    (
+        "发送历史漏记分类（历史看不出为什么发这张）",
+        "publish/dispatcher.py",
+        "                label=memo.label,",
+        '                label="other",',
+        "tests/test_T13_T23_dispatcher.py::test_send_is_recorded_to_history",
+    ),
+    (
+        "发送失败不记原因（历史只写「失败」，排查还得翻日志）",
+        "publish/dispatcher.py",
+        "            self._note_send(umo, memo, trigger_text, via, outcome=\"failed\", detail=detail)",
+        "            self._note_send(umo, memo, trigger_text, via, outcome=\"failed\")",
+        "tests/test_T13_T23_dispatcher.py::test_failed_send_records_error_type",
+    ),
+    (
+        "投递失败丢掉异常类型（历史只剩「失败」两个字）",
+        "publish/sender.py",
+        "        return False, type(exc).__name__",
+        '        return False, ""',
+        "tests/test_sender.py::test_deliver_reports_error_type",
+    ),
+    (
+        "宿主返回 False 与抛异常混成一种原因",
+        "publish/sender.py",
+        '        return False, "platform_unavailable"',
+        '        return False, "send_failed"',
+        "tests/test_sender.py::test_deliver_reports_error_type",
+    ),
 ]
 # 注：v1 → v2 的迁移目前没有 DDL（人格禁用表由 schema.sql 的 IF NOT EXISTS 建），
 # 所以「跳过迁移」这个变异没有可观察行为，不列在这里；老库升级用例只守

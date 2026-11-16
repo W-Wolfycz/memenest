@@ -91,3 +91,22 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- v3：发送历史。只记「真的发生过的发送」，被拦下的原因继续走内存聚合。
+-- 触发文本是用户自己看排查用的，不进日志（INFO 不承载聊天正文）。
+CREATE TABLE IF NOT EXISTS send_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at INTEGER NOT NULL,
+    umo        TEXT,
+    memo_id    INTEGER,
+    via        TEXT    NOT NULL,
+    label      TEXT    NOT NULL,
+    text       TEXT,
+    outcome    TEXT    NOT NULL,
+    -- 失败原因：异常类型名 / platform_unavailable / file_missing（不含聊天内容）
+    detail     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_send_log_created ON send_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_send_log_via ON send_log(via);
+
