@@ -57,12 +57,13 @@ AstrBot 表情包插件：拾取群聊里的表情（或所有图片）→ 视�
 只保留「必须当场、在聊天里完成」的几个：
 
 ```
+/memenest status        看库存与运行状态
+/memenest help          显示这份说明
 /memenest grab          引用一条带图的消息，把那张图收进来
 /memenest mute          把表情和这条指令一起发（或引用一张），对当前人格禁用这张
 /memenest unmute        同上，恢复它在当前人格下的可用
 /memenest on [分钟]     临时开启收集，不给分钟数就本次运行有效
 /memenest off [分钟]    临时关闭收集，已排队的任务会跑完
-/memenest status        看库存与运行状态
 ```
 
 `grab` 收的是**被引用的那一张**，跳过判定与节流，并绑定当前人格——聊到一半看到好图，引用它发一句 `grab` 就行。
@@ -74,7 +75,10 @@ AstrBot 表情包插件：拾取群聊里的表情（或所有图片）→ 视�
 `on` / `off` 只改运行期状态，不动配置；给分钟数就到点自动恢复。本来就是这个状态时指令静默，不回消息。
 
 其余操作都在管理页：审核、删除、拉黑、收藏、作用域、人格绑定与禁用人格、黑名单、容量、向量索引。
-`on` / `off` / `grab` / `mute` / `unmute` 需要管理员权限。
+**全部指令都需要管理员权限**，且是**用装饰器声明**的
+（`@filter.permission_type(PermissionType.ADMIN)`）——Dashboard 指令管理页显示的就是这个值；
+`verify_deploy` 会核对「注册到的每条指令都声明了 ADMIN」，改名或新增指令忘了声明会直接失败。
+改权限请改装饰器，不要在函数体里判 `is_admin()`（那样页面会一直显示 everyone）。
 
 这些子命令通过宿主的指令组（`@filter.command_group("memenest")`）注册，因此会出现在 WebUI 的指令列表和 `/help` 里；
 只发一个 `/memenest`（不带子命令）等同于 `status`。不带唤醒前缀的 `memenest status` 由插件的消息钩子兜底。

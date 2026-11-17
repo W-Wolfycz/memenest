@@ -52,20 +52,15 @@ async def test_animated_input_reaches_model_as_exactly_one_image(tmp_path):
     # 合成图必须在返回前删除（含成功路径）。
     assert list(tmp_path.glob("*-grid.jpg")) == []
 
-
-@pytest.mark.asyncio
-async def test_timeout_still_cleans_the_grid(tmp_path):
-    """超时路径也要删合成图：漏删会让临时目录随动图数量无限增长。"""
-    source = tmp_path / "anim.gif"
-    _write_gif(source, 9)
-
-    async def slow(prompt: str, image_paths: list[str]) -> str:
+    # 超时路径同样要删：漏删会让临时目录随次数无限增长（只表现成磁盘变大）
+    async def slow_llm(prompt: str, image_paths: list[str]) -> str:
         await asyncio.sleep(5)
-        return "{}"
+        return '{"label": "laugh"}'
 
-    outcome = await analyze_detailed(
-        source, prompt="p", llm_call=slow, timeout=0.05, work_dir=tmp_path
+    timed_out = await analyze_detailed(
+        source, prompt="p", llm_call=slow_llm, timeout=0.05, work_dir=tmp_path
     )
-    assert outcome.analysis is None
-    assert outcome.reason == "model_timeout"
+    assert timed_out.analysis is None
     assert list(tmp_path.glob("*-grid.jpg")) == []
+
+

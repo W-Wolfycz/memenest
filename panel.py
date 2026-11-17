@@ -75,6 +75,7 @@ class PanelApi:
         routes = (
             ("stats", self.handle_stats, ["GET"], "MemeNest 统计"),
             ("list", self.handle_list, ["GET"], "MemeNest 列表"),
+            ("memo", self.handle_memo, ["GET"], "MemeNest 单条详情"),
             ("thumb", self.handle_thumb, ["GET"], "MemeNest 缩略图"),
             ("preview", self.handle_preview, ["GET"], "MemeNest 原图预览"),
             ("delete", self.handle_delete, ["POST"], "MemeNest 删除"),
@@ -427,6 +428,16 @@ class PanelApi:
                 "items": [core.serialize_memo(memo) for memo in memos],
             }
         )
+
+    async def handle_memo(self) -> Any:
+        """GET ?id= → 单条详情：发送历史点进来定位用（不依赖当前页的列表）。"""
+        memo_id = core._as_int(request.query.get("id"), 0)
+        if memo_id <= 0:
+            return _fail("缺少条目编号")
+        memo = await asyncio.to_thread(self.plugin.store.get, memo_id)
+        if memo is None:
+            return _fail("这条已经不在了")
+        return json_response({"ok": True, "memo": core.serialize_memo(memo)})
 
     async def _page(self, args: core.PageArgs) -> tuple[list[Any], int]:
         store = self.plugin.store

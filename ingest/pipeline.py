@@ -30,7 +30,7 @@ from ..domain import (
     Draft,
     MediaRef,
 )
-from ..store import MemoStore, StoreError
+from ..store import MemoStore
 from . import dedup
 from .analyze import LLMCall, analyze_with_retry
 from .fetch import FetchLimits, fetch_media
@@ -418,7 +418,9 @@ class IngestPipeline:
                     self.counters.duplicate += 1
                     return "duplicate"
                 memo_id = await asyncio.to_thread(self.store.add, draft)
-        except StoreError as exc:
+        except Exception as exc:
+            # 任何写库异常都要把已经搬进来的文件撤掉：留下就是孤儿（库里没有引用它）。
+            # 记 ERROR 并返回显式 "failed"，不吞：上层会计入失败数、面板也看得到。
             self._log.error("[MemeNest] 写库失败 type=%s", type(exc).__name__)
             _unlink(target)
             return "failed"

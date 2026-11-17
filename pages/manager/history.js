@@ -35,7 +35,8 @@ function renderHistory(items, total) {
   const rows = items
     .map(
       (item) =>
-        `<div class="ov-send" data-thumb="${item.memo_id ?? ""}">` +
+        `<div class="ov-send" role="button" tabindex="0" data-thumb="${item.memo_id ?? ""}"` +
+        ` data-memo="${item.memo_id ?? ""}" title="点开这张表情">` +
         `<div class="ov-send-thumb">…</div>` +
         `<div class="ov-send-body"><div class="ov-send-line">` +
         `<time>${historyClock(item.created_at)}</time>` +
@@ -58,6 +59,16 @@ function renderHistory(items, total) {
     const thumb = row.querySelector(".ov-send-thumb");
     if (row.dataset.thumb) loadThumbInto(row.dataset.thumb, thumb);
     else thumb.textContent = "—";
+    if (row.dataset.memo) {
+      const open = () => void openMemoFromHistory(row.dataset.memo);
+      row.addEventListener("click", open);
+      row.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          open();
+        }
+      });
+    }
   }
   const pages = Math.max(1, Math.ceil(total / historyState.size));
   $("history-page-info").textContent =
@@ -82,6 +93,12 @@ async function loadHistory(page = historyState.page) {
   $("history-hint").textContent =
     `保留最近 ${historyState.days} 天` +
     (historyState.keep ? ` / 最多 ${historyState.keep} 条（先到先裁）` : "");
+}
+
+/** 从发送历史点进某张表情：切回表情管理视图并打开详情（列表里没有也能开）。 */
+async function openMemoFromHistory(memoId) {
+  window.__memenestView?.switch("manager");
+  await window.__memenest?.openMemo?.(Number(memoId));
 }
 
 function readFilters() {

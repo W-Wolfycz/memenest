@@ -269,6 +269,10 @@ class Main(Star):
     # 必须用宿主装饰器注册：只有注册过的指令才会出现在 WebUI 指令列表与 /help 里，
     # 也才会被宿主的指令管理页识别。on_any_message 里的手写解析只兜它覆盖不到的写法。
 
+    # 权限：**全部指令都是 ADMIN**。这些指令全都在动全局状态（往库里写、切收集开关、
+    # 改素材在某个人格下的可用），连 status 都会暴露库容与会话归属，所以不给所有人用。
+    # 声明用装饰器而不是在函数体里判 is_admin()：Dashboard 指令管理页显示的默认值
+    # 只认装饰器，函数体里判会与实际行为不一致（运维会误判）。
     @filter.command_group("memenest")
     def memenest_group(self) -> None:
         """表情窝：收集、审核、发图与人格绑定。"""
@@ -286,6 +290,7 @@ class Main(Star):
         return await self._runner.run(event, commands_core.ParsedCommand(sub, args))
 
     @memenest_group.command("status")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def memenest_status(self, event: AstrMessageEvent):
         """查看库存、队列与向量覆盖率。"""
         text = await self._run_command(event, "status")
@@ -293,11 +298,13 @@ class Main(Star):
             yield event.plain_result(text)
 
     @memenest_group.command("help")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def memenest_help(self, event: AstrMessageEvent):
         """列出可用子命令。"""
         yield event.plain_result(commands_core.render_help(self.command_name()))
 
     @memenest_group.command("grab")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def memenest_grab(self, event: AstrMessageEvent):
         """引用一条带图的消息，把那张图收进库。"""
         text = await self._run_command(event, "grab")
@@ -305,6 +312,7 @@ class Main(Star):
             yield event.plain_result(text)
 
     @memenest_group.command("on")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def memenest_on(self, event: AstrMessageEvent, minutes: str = ""):
         """临时开启收集，可带分钟数。"""
         args = (minutes,) if str(minutes).strip() else ()
@@ -313,6 +321,7 @@ class Main(Star):
             yield event.plain_result(text)
 
     @memenest_group.command("off")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def memenest_off(self, event: AstrMessageEvent, minutes: str = ""):
         """临时关闭收集，可带分钟数。"""
         args = (minutes,) if str(minutes).strip() else ()
@@ -321,6 +330,7 @@ class Main(Star):
             yield event.plain_result(text)
 
     @memenest_group.command("mute")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def memenest_mute(self, event: AstrMessageEvent):
         """把表情和指令一起发（或引用一张），对当前人格禁用它。"""
         text = await self._run_command(event, "mute")
@@ -328,6 +338,7 @@ class Main(Star):
             yield event.plain_result(text)
 
     @memenest_group.command("unmute")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def memenest_unmute(self, event: AstrMessageEvent):
         """恢复这张表情在当前人格下的可用。"""
         text = await self._run_command(event, "unmute")

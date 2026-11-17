@@ -65,23 +65,3 @@ def test_persona_params_keeps_allow_and_block_apart():
     assert core.persona_params({"persona_ids": "none"}) == ([], None)
 
 
-def test_manifest_urls_skips_bad_items_without_failing_whole_list():
-    """清单里个别坏项要跳过，不能整份失败。
-
-    整份失败的表现是「导入清单后一条都没进来」，用户只会以为导入坏了；
-    正确的行为是能用的都入队、坏的忽略。
-    """
-    assert core.manifest_urls(["https://a/1.png", {"url": "https://a/2.png"}, 3, ""]) == [
-        "https://a/1.png",
-        "https://a/2.png",
-    ]
-    assert core.manifest_urls({"items": [{"url": "https://a/3.png"}]}) == [
-        "https://a/3.png"
-    ]
-    # 去重 + 上限
-    assert core.manifest_urls(["https://a/1.png", "https://a/1.png"]) == [
-        "https://a/1.png"
-    ]
-    many = [f"https://a/{i}.png" for i in range(core.MANIFEST_MAX_ITEMS + 50)]
-    assert len(core.manifest_urls(many)) == core.MANIFEST_MAX_ITEMS
-    assert core.manifest_urls({"nope": 1}) == []

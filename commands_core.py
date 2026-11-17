@@ -8,9 +8,11 @@ from typing import Any
 
 
 PAGE_SIZE_DEFAULT = 10
-READ_SUBS: frozenset[str] = frozenset({"status", "help"})
-WRITE_SUBS: frozenset[str] = frozenset({"on", "off", "grab", "mute", "unmute"})
-ALL_SUBS = READ_SUBS | WRITE_SUBS
+# 子命令清单：全部都要管理员权限（见 main.py 的 @filter.permission_type 声明），
+# 所以这里不再区分读写。
+ALL_SUBS: frozenset[str] = frozenset(
+    {"status", "help", "on", "off", "grab", "mute", "unmute"}
+)
 LEADING_MARKS = ("/", "!", "！", "／", "#", ".")
 _MENTION = re.compile(r"^(?:@\S+\s+)+")
 
@@ -23,10 +25,6 @@ class ParsedCommand:
     default: bool = False
     """没写子命令（只发了 `/memenest`）：默认按 status 处理，同时用来判定
     「这条消息命中的是哪个指令」——宿主的 command filter 不会匹配这种写法。"""
-
-    @property
-    def is_write(self) -> bool:
-        return self.sub in WRITE_SUBS
 
 
 def parse_command(text: str, command_name: str) -> ParsedCommand | None:
@@ -61,12 +59,14 @@ def render_help(command_name: str) -> str:
     return "\n".join(
         [
             f"表情窝（/{command_name}）：",
+            "  status        看库存与运行状态",
+            "  help          显示这份说明",
             "  grab          引用一条带图的消息，把那张图收进来",
             "  mute          发/引用一张表情，对当前人格禁用它",
             "  unmute        发/引用一张表情，恢复它在当前人格下的可用",
             "  on [分钟]     临时开启收集，不给分钟数就本次运行有效",
             "  off [分钟]    临时关闭收集，已排队的任务会跑完",
-            "  status        看库存与运行状态",
+            "以上指令都需要管理员权限。",
         ]
     )
 
@@ -135,8 +135,6 @@ def parse_int(token: str) -> int | None:
 __all__ = [
     "ALL_SUBS",
     "ParsedCommand",
-    "READ_SUBS",
-    "WRITE_SUBS",
     "parse_command",
     "parse_switch_minutes",
     "render_help",

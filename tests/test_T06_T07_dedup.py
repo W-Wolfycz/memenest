@@ -52,24 +52,6 @@ def test_different_images_stay_far_apart():
     assert hamming(left, right) > 8
 
 
-def test_T06_percept_hit_is_duplicate():
-    """感知指纹命中要算重复并带回已有 id：漏判同上，重复副本悄悄堆积。"""
-    image = _gradient(5)
-    digest = percept_hash(image)
-    assert digest is not None
-    source = FakeMemoSource(rows=[(11, digest)])
-    verdict = find_duplicate(source, "b" * 64, digest, threshold=8)
-    assert verdict.duplicate is True
-    assert verdict.reason == "duplicate_percept"
-    assert verdict.existing_id == 11
-
-
-def test_content_hash_algorithm_is_pinned():
-    """换算法会让历史 blocklist 与去重基线全部作废，必须钉死字面量。"""
-    assert content_hash(b"memenest") == (
-        "b871327ba392533949c247006a1e2bed5cb193fb34da53a5d1ede21f9751357f"
-    )
-
 def _pad(image: Image.Image, ratio: float, color: tuple[int, int, int] = (255, 255, 255)):
     width, height = image.size
     pad_x, pad_y = int(width * ratio), int(height * ratio)

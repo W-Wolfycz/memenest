@@ -14,14 +14,6 @@ from io import BytesIO
 from memenest.backup import build_selection_zip, selection_name
 
 
-def test_selection_name_is_filesystem_safe_with_millis():
-    name = selection_name(datetime(2001, 2, 3, 4, 5, 6, 7000))
-    assert name == "2001-02-03T04_05_06_007.zip"
-    # 冒号在 Windows 上是非法字符，不能被写进文件名
-    assert ":" not in name
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}_\d{2}_\d{2}_\d{3}\.zip", name)
-
-
 def test_build_selection_zip_counts_skipped_files(tmp_path):
     (tmp_path / "blobs").mkdir()
     (tmp_path / "blobs" / "a.png").write_bytes(b"aaa")

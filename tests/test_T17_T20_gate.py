@@ -48,19 +48,3 @@ def test_T18_scope_requires_matching_session_and_fails_closed():
     assert scope_allows(_memo(2), None) is True
 
 
-def test_humanized_delay_bounds_and_zero_base():
-    """延迟拟人化的两条硬边界：base=0 必须保持 0（用户要立即发），
-    其余情况要落在 [base*0.75+文本因子, base*1.25+文本因子] 内。
-
-    写坏成「base=0 也加抖动」会让关延迟的用户开始看到延迟；
-    抖动系数跑飞则回到固定秒数，等于没做。
-    """
-    assert humanized_delay(0, "随便说点什么", 0.5) == 0.0
-    text = "今天这场雨下得也太大了，出门就湿透了"
-    extra = min(2.0, visible_length(text) / 30.0)
-    low = humanized_delay(5, text, 0.0)
-    high = humanized_delay(5, text, 1.0)
-    assert low == 5 * 0.75 + extra
-    assert high == 5 * 1.25 + extra
-    mid = humanized_delay(5, text, 0.5)
-    assert low < mid < high

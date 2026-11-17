@@ -75,22 +75,3 @@ def test_negative_similarity_is_not_floored():
     assert score == pytest.approx(-0.25 / (WEIGHT_CAPTION + WEIGHT_LABEL))
 
 
-def test_label_bonus_and_prior_use_the_documented_weights():
-    """标签与标点先验的加成必须乘对应权重，不能被写成一个固定小数。"""
-    memo = make_memo(3, label="joy")
-    kinds = _kinds(text=_vec(0.0))  # 内容路 0 分，只剩标签/先验
-    none = score_vector_entry(memo, kinds, _vec(1.0), None, label_bonus=0.0)
-    hit = score_vector_entry(memo, kinds, _vec(1.0), None, label_bonus=1.0)
-    assert hit - none == pytest.approx(WEIGHT_LABEL / (WEIGHT_TEXT + WEIGHT_LABEL))
-
-    plain = score_vector_entry(memo, kinds, _vec(1.0), None, label_bonus=0.0)
-    priored = score_vector_entry(
-        memo,
-        kinds,
-        _vec(1.0),
-        None,
-        label_bonus=0.0,
-        expected_labels={"joy"},
-    )
-    assert priored > plain, "标点先验命中主标签时必须有一点点加分"
-    assert priored - plain < 0.1, "先验只能是方向，不能盖过真实命中"

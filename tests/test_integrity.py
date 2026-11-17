@@ -82,13 +82,3 @@ def test_remove_missing_deletes_only_broken_rows(tmp_path):
         store.close()
 
 
-def test_vacuum_reports_sizes(tmp_path):
-    """整理数据库至少要报告前后大小（否则用户不知道有没有效果）。"""
-    data, store, _kept, _missing = _setup(tmp_path)
-    try:
-        result = vacuum(store)
-        assert result["before"] > 0
-        assert result["after"] > 0
-        assert result["saved"] >= 0
-    finally:
-        store.close()

@@ -148,8 +148,13 @@ def create_backup(data_dir: Path, db_path: Path, *, stem: str | None = None) -> 
         try:
             (directory / old["name"]).unlink()
             logger.info("[MemeNest] 清理旧备份 %s", old["name"])
-        except OSError:
-            pass
+        except OSError as exc:
+            # 删不掉就留着，但要说出来：否则旧备份会无限堆积且没人知道
+            logger.warning(
+                "[MemeNest] 清理旧备份失败 name=%s type=%s",
+                old["name"],
+                type(exc).__name__,
+            )
     logger.info("[MemeNest] 备份完成 %s size=%s", target.name, target.stat().st_size)
     return target
 

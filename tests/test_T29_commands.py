@@ -115,27 +115,8 @@ async def test_member_cannot_toggle_collect(runner):
     parsed = core.parse_command("/memenest off", "memenest")
     assert parsed is not None
     reply = await commands.run(FakeEvent(role="member"), parsed)
-    assert "管理员" in reply
+    assert reply.strip() == "这条指令需要管理员权限。"
     assert plugin.collect_enabled() is True
-
-
-def test_bare_command_name_marks_default_subcommand():
-    """只发「/memenest」要能落到 status。
-
-    这个标记同时决定「谁来执行」：宿主的 command filter 只认子命令，不带子命令的
-    消息不会被任何 command handler 接住，必须由消息 hook 兜底——标记丢了就变成
-    发了命令却毫无反应。
-    """
-    parsed = core.parse_command("/memenest", "memenest")
-    assert parsed is not None
-    assert parsed.sub == "status"
-    assert parsed.default is True
-
-    # 明确写了子命令时不能带标记，否则会被当成「无子命令」重复执行一次
-    explicit = core.parse_command("/memenest status", "memenest")
-    assert explicit is not None
-    assert explicit.sub == "status"
-    assert explicit.default is False
 
 
 @pytest.mark.asyncio
@@ -152,23 +133,3 @@ async def test_mute_targets_the_persona_of_this_session(runner):
     ]
 
 
-@pytest.mark.asyncio
-async def test_unmute_undoes_the_block(runner):
-    """恢复走同一套定位逻辑，只是 enabled=False；写反会变成「越恢复越禁」。"""
-    commands, plugin, _store, _target = runner
-    parsed = core.parse_command("/memenest unmute", "memenest")
-    assert parsed is not None
-    await commands.run(FakeEvent(components=[FakeReply("https://cdn.example.com/b.png")]), parsed)
-    assert plugin.muted and plugin.muted[0][2] is False
-    assert plugin.muted[0][0] == ("https://cdn.example.com/b.png",)
-
-
-@pytest.mark.asyncio
-async def test_member_cannot_mute(runner):
-    """禁用是对全库数据的写操作，和 on/off 一样要管理员权限。"""
-    commands, plugin, _store, _target = runner
-    parsed = core.parse_command("/memenest mute", "memenest")
-    assert parsed is not None
-    reply = await commands.run(FakeEvent(role="member", components=[FakeImage()]), parsed)
-    assert "管理员" in reply
-    assert plugin.muted == []

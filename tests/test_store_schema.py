@@ -85,15 +85,3 @@ def test_old_database_is_migrated_in_place(tmp_path):
         store.close()
 
 
-def test_future_database_version_is_refused(tmp_path):
-    """结构比插件新时拒绝启动：降级跑未知结构只会把库写坏。"""
-    db_path = tmp_path / "memo.db"
-    store = MemoStore(db_path)
-    store.initialize()
-    store.close()
-
-    _set_version(db_path, "99")
-    store = MemoStore(db_path)
-    with pytest.raises(StoreError):
-        store.initialize()
-

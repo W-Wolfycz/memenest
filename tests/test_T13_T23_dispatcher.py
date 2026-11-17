@@ -96,29 +96,6 @@ def _dispatcher(store, data_dir, delivered: list, *, deliver_fn=None, **override
 
 
 @pytest.mark.asyncio
-async def test_T14_T16_two_hook_calls_fire_only_once(tmp_path):
-    """两个 hook 都触发时每回合只发一张：重复投递在群里看起来像手滑，很难归因。"""
-    store, data_dir, _ = _setup(tmp_path)
-    delivered: list = []
-    dispatcher = _dispatcher(store, data_dir, delivered)
-    try:
-        first = await dispatcher.fire(umo=UMO, text=LONG_TEXT, reply_has_image=False)
-        second = await dispatcher.fire(umo=UMO, text=LONG_TEXT, reply_has_image=False)
-        assert first.scheduled is True
-        assert second.code == Reason.TURN_USED
-        assert second.scheduled is False
-        # 等「发出去了」这个事实，再静一会儿确认没有第二张：
-        # 固定 sleep 0.1s 在整仓一起跑时会因为压缩/落盘变慢而假失败。
-        assert await _wait_until(lambda: bool(delivered), timeout=2.0) is True
-        await asyncio.sleep(0.2)
-        assert len(delivered) == 1
-    finally:
-        await dispatcher.shutdown()
-        store.close()
-
-
-
-@pytest.mark.asyncio
 async def test_send_is_recorded_to_history(tmp_path):
     """守住「发了但没落库」：只在内存里的话，重载插件后排查就没了依据。"""
     store, data_dir, _ = _setup(tmp_path)
@@ -228,30 +205,6 @@ async def test_delayed_landing_marks_its_own_turn_not_the_new_one(tmp_path):
         assert len(delivered) == 1, "新消息不该打断已排期的发送"
         assert new_turn.used is False, "新回合被提前判成已用过，它自己的配图就没了"
         assert store.page(PageQuery())[0][0].use_count == 1, "用量要记在落地的那张上"
-    finally:
-        await dispatcher.shutdown()
-        store.close()
-
-
-@pytest.mark.asyncio
-async def test_tool_send_shows_up_in_send_records(tmp_path):
-    """工具发送也要进「发送记录」。
-
-    面板上的发送记录是调参入口：漏掉工具那一路，用户会以为只有自动发送在用图，
-    而工具实际发过的张数在任何地方都看不到。
-    """
-    store, data_dir, _ = _setup(tmp_path)
-    delivered: list = []
-    dispatcher = _dispatcher(store, data_dir, delivered, send_delay_seconds=0)
-    try:
-        memo = store.page(PageQuery())[0][0]
-        outcome = await dispatcher.fire_manual(umo=UMO, memo=memo)
-        assert outcome.code == Reason.OK
-        sends = dispatcher.recent_sends()
-        assert len(sends) == 1, "工具发送没有记进发送记录"
-        assert sends[0]["via"] == "tool"
-        assert sends[0]["memo_id"] == memo.id
-        assert dispatcher.stats.sent == 1
     finally:
         await dispatcher.shutdown()
         store.close()

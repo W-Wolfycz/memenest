@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from memenest.store import SEND_LOG_DAYS, SEND_LOG_MAX, MemoStore
+from memenest.store import SEND_LOG_DAYS, MemoStore
 
 
 def _store(tmp_path) -> MemoStore:
@@ -27,26 +27,6 @@ def _add(store: MemoStore, *, at: int, via: str = "vector", text: str = "", memo
     )
 
 
-def test_history_is_newest_first_and_filterable(tmp_path):
-    store = _store(tmp_path)
-    try:
-        _add(store, at=100, via="vector", text="第一条")
-        _add(store, at=200, via="keyword", text="第二条")
-        _add(store, at=300, via="tool", text="第三条")
-
-        items, total = store.page_send_logs()
-        assert total == 3
-        assert [item["created_at"] for item in items] == [300, 200, 100], "新的在前"
-
-        only_tool, tool_total = store.page_send_logs(via="tool")
-        assert tool_total == 1 and only_tool[0]["via"] == "tool"
-
-        hits, hit_total = store.page_send_logs(query="第二")
-        assert hit_total == 1 and hits[0]["text"] == "第二条"
-    finally:
-        store.close()
-
-
 def test_expired_rows_are_pruned_but_recent_kept(tmp_path):
     store = _store(tmp_path)
     now = 1_700_000_000
@@ -57,20 +37,14 @@ def test_expired_rows_are_pruned_but_recent_kept(tmp_path):
         assert removed == 1, "只删超期那条"
         items, total = store.page_send_logs()
         assert total == 1 and items[0]["text"] == "刚发"
-    finally:
-        store.close()
 
-
-def test_overflow_prunes_oldest_keeps_newest(tmp_path):
-    store = _store(tmp_path)
-    try:
-        # 写两条，再把上限临时压到 1：留下来的必须是最新那条
-        _add(store, at=100, text="旧")
-        _add(store, at=200, text="新")
-        removed = store.prune_send_logs(200, days=SEND_LOG_DAYS, keep=1)
-        assert removed == 1
+        # 超量同理：上限压到 1 时必须留下**最新**那条，别把刚发的删掉
+        _add(store, at=now + 60, text="更新")
+        removed_more = store.prune_send_logs(now + 60, keep=1)
+        assert removed_more == 1
         items, total = store.page_send_logs()
-        assert total == 1 and items[0]["text"] == "新"
-        assert SEND_LOG_MAX > 1000, "条数上限要足够覆盖日常量"
+        assert total == 1 and items[0]["text"] == "更新"
     finally:
         store.close()
+
+

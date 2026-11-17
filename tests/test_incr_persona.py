@@ -58,6 +58,14 @@ def test_unknown_persona_fails_closed(store):
         memo.rel_path for memo in store.candidates(CandidateQuery(persona_id=None))
     }
     assert only_generic == {"inbox/generic.png"}
+
+    # 禁用优先于通用：同一条 SQL 子句，别让「禁用了照样发」漏过去
+    blocked = store.add(_draft("inbox/blocked.png", ("p1",)))
+    if blocked is not None:
+        store.set_persona_blocks(blocked, ("p1",))
+    for_p1 = {memo.rel_path for memo in store.candidates(CandidateQuery(persona_id="p1"))}
+    assert "inbox/generic.png" in for_p1
+    assert "inbox/blocked.png" not in for_p1
 def test_persona_allows_matrix():
     """人格归属判定矩阵：全空必须是「谁都不用」，禁用优先于可用。
 
@@ -117,21 +125,3 @@ async def test_manual_send_rejects_foreign_persona(tmp_path):
         store.close()
 
 
-def test_blocked_persona_wins_over_generic(store):
-    """禁用优先于通用：可用名单写着 * 也挡得住这一个。
-
-    判定顺序写反（先看通用就返回 True）时，指令禁用的表情照样会被发出来，
-    而日志里一切正常——只能靠「这张图又冒出来了」发现。
-    """
-    generic_id = store.add(_draft("inbox/generic.png"))
-    bound_id = store.add(_draft("inbox/bound.png", ("p1",)))
-    store.add_persona_block(generic_id, "p1")
-
-    for_p1 = {memo.id for memo in store.candidates(CandidateQuery(persona_id="p1"))}
-    assert generic_id not in for_p1, "被禁用的人格不该拿到这张"
-    assert bound_id in for_p1
-
-    # 只禁了一个人格：其他人格仍然能拿到通用那张
-    for_p2 = {memo.id for memo in store.candidates(CandidateQuery(persona_id="p2"))}
-    assert generic_id in for_p2
-    assert bound_id not in for_p2

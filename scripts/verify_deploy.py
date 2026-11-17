@@ -143,6 +143,36 @@ def main() -> int:
         f"缺 {sorted(missing)}" if missing else ", ".join(sorted(registered)),
     )
 
+    # 6.6 指令权限：Dashboard 指令管理页显示的「默认权限」只认装饰器声明，
+    # 在函数体里判 is_admin() 会让它一直显示 everyone，与实际行为不一致。
+    from astrbot.core.star.filter.permission import PermissionType, PermissionTypeFilter
+
+    # 全部指令都是 ADMIN：期望集合直接取「注册到的指令」，将来新增指令忘了声明
+    # 装饰器也会在这里失败，而不是等到线上被普通人用到。
+    expected_admin = set(registered)
+    check(
+        "指令清单非空（权限比对才有意义）",
+        bool(expected_admin),
+        f"{len(expected_admin)} 条" if expected_admin else "注册结果为 0，权限比对会空对空通过",
+    )
+    actual_admin: set[str] = set()
+    for handler in hooks:
+        names: set[str] = set()
+        is_admin = False
+        for event_filter in handler.event_filters:
+            if isinstance(event_filter, CommandFilter):
+                names.update(event_filter.get_complete_command_names())
+            elif isinstance(event_filter, PermissionTypeFilter):
+                is_admin = event_filter.permission_type == PermissionType.ADMIN
+        if is_admin:
+            actual_admin.update(names)
+    admin_diff = expected_admin.symmetric_difference(actual_admin)
+    check(
+        "指令权限声明正确",
+        not admin_diff,
+        f"不一致 {sorted(admin_diff)}" if admin_diff else f"ADMIN: {sorted(actual_admin)}",
+    )
+
     # 8. schema 叶子键与配置字段一一对应（少一个就是配置静默失效）
     try:
         import dataclasses

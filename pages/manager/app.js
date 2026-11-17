@@ -537,11 +537,19 @@ async function runCardAction(card, actionName) {
   const id = Number(card.dataset.id);
   const item = state.items.find((entry) => entry.id === id);
   if (!item) return;
+  await runMemoAction(item, actionName);
+}
+
+/** 针对某一条的操作：卡片与详情弹层共用（详情里那条可能不在当前页列表里）。 */
+async function runMemoAction(item, actionName) {
+  const id = item.id;
   if (actionName === "delete" || actionName === "ban") {
     if (!confirmTwice(`${actionName}-${id}`, actionName === "ban" ? "拉黑" : "删除")) return;
     const res = await guard(() => api.post(actionName, { ids: [id] }), "操作");
     if (res && res.ok && (res.succeeded || []).length) {
       toast(actionName === "ban" ? "已删除并拉黑" : "已删除");
+      state.detailItem = null;
+      closeModal();
       await Promise.all([loadStats(), loadList()]);
     } else if (res && res.ok) {
       toast(failedReason(res), true);
@@ -556,6 +564,10 @@ async function runCardAction(card, actionName) {
       return;
     }
     toast(`已改为「${STATE_NAME[next] || next}」`);
+    if (state.detailItem && state.detailItem.id === id) {
+      state.detailItem.state = next;
+      openMemoDetail(state.detailItem);
+    }
     await Promise.all([loadStats(), loadList()]);
     return;
   }
@@ -598,6 +610,60 @@ function openModal(title, body) {
   $("modal").hidden = false;
   const first = panel.querySelector(".modal-body input, .modal-body textarea, .modal-body select");
   if (first) first.focus();
+}
+
+
+/** 单条详情：缩略图 + 关键字段 + 编辑入口。发送历史点进来用它定位。 */
+function openMemoDetail(item) {
+  const stateName = STATE_NAME[item.state] || item.state;
+  const extra = (item.labels || []).map((entry) => entry.name).join(" / ");
+  const persona = item.persona_generic
+    ? "通用"
+    : (item.persona_ids || []).join(" / ") || "未绑定";
+  const rows = [
+    ["状态", stateName],
+    ["分类", item.label_name + (extra ? ` · ${extra}` : "")],
+    ["描述", item.caption || "—"],
+    ["图上文字", item.text_in_image || "—"],
+    ["场景", (item.scenes || []).join(" / ") || "—"],
+    ["人格", persona],
+    ["用过", `${item.use_count} 次` + (item.is_fav ? " · 已收藏" : "")],
+  ]
+    .map(
+      ([name, value]) =>
+        `<div class="detail-row"><span>${escapeHtml(name)}</span>` +
+        `<b>${escapeHtml(String(value))}</b></div>`,
+    )
+    .join("");
+  openModal(
+    `表情 #${item.id}`,
+    `<div class="detail">
+       <div class="detail-thumb" id="detail-thumb">…</div>
+       <div class="detail-rows">${rows}</div>
+     </div>
+     <div class="form-actions detail-actions">
+       <button type="button" class="btn primary" data-modal="edit-this">编辑</button>
+       <button type="button" class="act-btn act-state-${item.state}" data-modal="detail-state"
+         title="点击切换：审核 → 可用 → 禁用 ⇄ 可用">
+         ${ICONS[STATE_ICON[item.state] || "pending"]}
+         <span>${STATE_NAME[item.state] || item.state}</span></button>
+       <button type="button" class="btn small danger" data-modal="detail-ban">拉黑</button>
+       <button type="button" class="btn small danger" data-modal="detail-delete">删除</button>
+     </div>`,
+  );
+  state.detailItem = item;
+  $("modal-panel").dataset.memoId = String(item.id);
+  loadThumbInto(item.id, $("detail-thumb"));
+}
+
+/** 按 id 打开详情（发送历史用）。列表里没有这条也能开。 */
+async function openMemoById(id) {
+  const res = await guard(() => api.get("memo", { id }), "读取表情");
+  if (!res || !res.ok) {
+    toast((res && res.message) || "这张已经不在了", true);
+    return;
+  }
+  openMemoDetail(res.memo);
 }
 
 function closeModal() {
@@ -645,8 +711,15 @@ function selectedExtraLabels() {
 }
 
 function openEdit(id) {
-  const item = state.items.find((entry) => entry.id === id);
+  const item =
+    state.detailItem && state.detailItem.id === id
+      ? state.detailItem
+      : state.items.find((entry) => entry.id === id);
   if (!item) return;
+  openEditItem(item);
+}
+
+function openEditItem(item) {
   const current = item.label;
   const extra = new Set((item.labels || []).map((entry) => entry.key));
   const options = LABELS.map(
@@ -655,7 +728,7 @@ function openEdit(id) {
   ).join("");
   const chips = renderChips(current, extra);
   openModal(
-    `编辑 #${id}`,
+    `编辑 #${item.id}`,
     `<div class="form">
       <div class="field-block field-caption">
         <label class="form-row"><span>描述 · 画面里有什么</span>
@@ -696,7 +769,7 @@ function openEdit(id) {
        <button type="button" class="btn primary" data-modal="save-edit">保存</button>
      </div>`,
   );
-  $("modal-panel").dataset.memoId = String(id);
+  $("modal-panel").dataset.memoId = String(item.id);
 
   const select = modalNode(".edit-label");
   select.addEventListener("change", () => {
@@ -1424,7 +1497,17 @@ function bindEvents() {
     }
     const action = event.target.closest("[data-modal]");
     if (!action) return;
-    if (action.dataset.modal === "save-edit") {
+    if (action.dataset.modal?.startsWith("detail-")) {
+      if (!state.detailItem) return;
+      const what = action.dataset.modal.slice("detail-".length);
+      await runMemoAction(state.detailItem, what);
+      return;
+    }
+    if (action.dataset.modal === "edit-this") {
+      const current = state.detailItem
+        || state.items.find((entry) => String(entry.id) === $("modal-panel").dataset.memoId);
+      if (current) openEditItem(current);
+    } else if (action.dataset.modal === "save-edit") {
       await saveEdit();
     } else if (action.dataset.modal === "save-persona") {
       await bindPersona();
@@ -1534,6 +1617,7 @@ init();
 // 宿主会按 URL 重写 import 说明符，而脚本 src 带 ?v=，两者 URL 不同会让本文件
 // 被当成两个模块各执行一遍（事件重复绑定、接口重复请求）。
 window.__memenest = {
+  openMemo: openMemoById,
   $,
   api,
   toast,

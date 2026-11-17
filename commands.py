@@ -31,7 +31,10 @@ class CommandRunner:
 
     async def run(self, event: Any, parsed: core.ParsedCommand) -> str:
         umo = getattr(event, "unified_msg_origin", "")
-        if parsed.is_write and not _is_admin(event):
+        # 宿主侧用 @filter.permission_type(ADMIN) 声明过了（Dashboard 认那个）；
+        # 这里是兜底解析路径的防线——不带唤醒前缀的「memenest grab」「memenest status」
+        # 不走装饰器。全部子命令都要求管理员，所以这里不再按子命令类型区分。
+        if not _is_admin(event):
             return "这条指令需要管理员权限。"
         handler = getattr(self, f"_do_{parsed.sub}", None)
         if handler is None:

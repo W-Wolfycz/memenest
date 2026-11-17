@@ -455,4 +455,7 @@ async function initOverview() {
   switchView("overview");
 }
 
+// 供 history.js 切视图用（发送历史点某个表情时要先切回表情管理）
+window.__memenestView = { switch: switchView };
+
 initOverview();

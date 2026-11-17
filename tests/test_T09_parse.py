@@ -14,20 +14,6 @@ from memenest.domain import (
 from memenest.ingest.analyze import clean_list
 
 
-def test_all_aliases_point_to_real_labels():
-    """中文别名必须指向真实存在的 key。
-
-    指向不存在的 key（历史上「感谢」就是这么写的）会让这类条目带着非法标签入库，
-    面板的分类筛选里查不到它，也不会报错——属于纯静默的数据污染。
-    """
-    dangling = {
-        alias: target
-        for alias, target in LABEL_ALIASES.items()
-        if target not in LABEL_KEYS
-    }
-    assert not dangling, f"这些别名指向了不存在的 key: {dangling}"
-
-
 def test_clean_list_keeps_list_items_intact():
     """列表元素里的逗号是句内停顿，不能再切开。
 

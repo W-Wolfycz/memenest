@@ -1530,3 +1530,170 @@ body:not([data-view="manager"]) #refresh {
 [data-theme="dark"] .tab.is-active {
   box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.6);
 }
+
+/* ---------- 单条详情弹层 ---------- */
+
+.detail {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.detail-thumb {
+  width: 108px;
+  height: 108px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--plate);
+  color: var(--muted);
+  font: 400 10px/1 var(--font-mono);
+  overflow: hidden;
+}
+
+.detail-thumb img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.detail-rows {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.detail-row {
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 4px 0;
+  border-bottom: 1px dotted var(--line);
+}
+
+.detail-row:last-child {
+  border-bottom: 0;
+}
+
+.detail-row span {
+  flex: none;
+  color: var(--muted);
+  font: 400 11px/1.5 var(--font-ui);
+}
+
+.detail-row b {
+  min-width: 0;
+  color: var(--ink);
+  font: 400 12px/1.5 var(--font-ui);
+  text-align: right;
+  word-break: break-word;
+}
+
+/* 发送历史里的行可以点开表情 */
+.ov-history-list .ov-send[data-memo] {
+  cursor: pointer;
+}
+
+.ov-history-list .ov-send[data-memo]:hover {
+  background: var(--plate);
+}
+
+.ov-history-list .ov-send[data-memo]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* ---------- 窄屏（手机）：弹层改成底部抽屉，输入控件放大 ---------- */
+
+@media (max-width: 640px) {
+  .top {
+    padding: 18px 16px 12px;
+    gap: 10px 16px;
+  }
+
+  .toolbar {
+    padding: 0 16px 12px;
+    gap: 14px;
+  }
+
+  main.grid {
+    padding: 0 16px 16px;
+  }
+
+  .modal {
+    padding: 0;
+    place-items: end stretch;
+  }
+
+  .modal-panel {
+    width: 100%;
+    max-height: 92vh;
+    border-radius: 14px 14px 0 0;
+    /* 底部留白交给吸底按钮条，避免它下面还漏出一行正文 */
+    padding: 14px 16px 0;
+  }
+
+  /* 16px 起步，避免 iOS 聚焦时自动放大整页 */
+  .modal-panel input,
+  .modal-panel textarea,
+  .modal-panel select,
+  .field input,
+  .field select,
+  .field textarea {
+    font-size: 16px;
+    min-height: 42px;
+  }
+
+  .modal-panel .btn,
+  .modal-panel .act-btn,
+  .form-actions .btn,
+  .card-actions .btn,
+  .card-actions .act-btn {
+    min-height: 40px;
+    padding: 8px 14px;
+    font-size: 13px;
+  }
+
+  .form-actions,
+  .modal-actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    margin: 0 -16px;
+    padding: 10px 16px 20px;
+    background: var(--panel);
+    box-shadow: 0 -8px 16px rgba(20, 18, 14, 0.06);
+  }
+
+  .modal-actions {
+    justify-content: stretch;
+  }
+
+  .modal-actions .btn {
+    flex: 1;
+  }
+
+  .detail {
+    flex-direction: column;
+  }
+
+  .detail-thumb {
+    width: 100%;
+    height: 168px;
+  }
+}
+
+/* 详情弹层的动作条：编辑 + 三个操作 + 关闭，窄屏自动换行 */
+.detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.detail-actions .btn {
+  flex: 0 0 auto;
+}

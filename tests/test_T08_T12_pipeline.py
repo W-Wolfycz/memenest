@@ -146,38 +146,33 @@ async def test_T08_model_failure_leaves_no_row_and_no_file(tmp_path):
         assert _files_under(data_dir / "tmp") == []
         assert _files_under(data_dir / "inbox") == []
         assert _files_under(data_dir / "blobs") == []
-    finally:
-        await pipeline.stop()
-        store.close()
 
+        # 另一种触发点：模型成功但写库失败，同样不能留下半个文件
+        async def ok_llm(prompt: str, images: list[str]) -> str:
+            return '{"label": "joy", "caption": "猫"}'
 
-@pytest.mark.asyncio
-async def test_T12_store_failure_removes_the_moved_file(tmp_path, monkeypatch):
-    """写库失败要删掉已经移动的文件：否则每失败一次就留下一个没人引用的孤儿文件。"""
-    settings = _settings()
-    source = tmp_path / "three.png"
-    _write_png(source, (10, 200, 10))
+        broken = tmp_path / "three.png"
+        _write_png(broken, (10, 200, 10))
+        pipeline._llm_call = lambda: ok_llm  # noqa: SLF001 - 直接换掉分类用的模型调用
 
-    async def llm(prompt: str, images: list[str]) -> str:
-        return '{"label": "laugh", "caption": "笑"}'
+        def boom(*args, **kwargs):
+            raise RuntimeError("db down")
 
-    pipeline, store, data_dir = _build(tmp_path, settings, llm)
-    await pipeline.start()
-
-    def boom(draft):
-        raise StoreError("simulated disk failure")
-
-    monkeypatch.setattr(store, "add", boom)
-    try:
-        pipeline.submit([_ref(source)], IngestContext(umo=UMO))
-        await asyncio.wait_for(pipeline.wait_idle(), timeout=10)
+        original_add = store.add
+        store.add = boom
+        try:
+            pipeline.submit([_ref(broken)], IngestContext(umo=UMO))
+            await asyncio.wait_for(pipeline.wait_idle(), timeout=15)
+        finally:
+            store.add = original_add
         assert store.stats().total == 0
-        # 条目既没有半行记录，也没有留下孤儿文件。
         assert _files_under(data_dir / "inbox") == []
-        assert _files_under(data_dir / "tmp") == []
+        assert _files_under(data_dir / "blobs") == []
     finally:
         await pipeline.stop()
         store.close()
+
+
 def test_rel_path_guard_rejects_escapes():
     """入库路径守卫：库里的每一条 rel_path 都必须落在数据目录内。"""
     assert safe_rel_path("inbox/20260101_abababab.png") is True

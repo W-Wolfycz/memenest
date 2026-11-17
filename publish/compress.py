@@ -7,9 +7,12 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 CACHE_SUBDIR = "cache/out"
 ANIMATED_MAX_FRAMES = 60
@@ -147,6 +150,7 @@ def clear_cache(cache_dir: Path, max_age: float = 0.0) -> int:
     每轮整体清掉等于每次发送都重新压一遍，缓存就白做了。
     """
     removed = 0
+    failed = 0
     if not cache_dir.exists():
         return 0
     cutoff = time.time() - max_age if max_age > 0 else None
@@ -159,7 +163,10 @@ def clear_cache(cache_dir: Path, max_age: float = 0.0) -> int:
             entry.unlink()
             removed += 1
         except OSError:
-            continue
+            # 删不掉就计数：缓存永不收缩是「磁盘慢慢变大」的静默失效
+            failed += 1
+    if failed:
+        logger.warning("[MemeNest] 清理压缩缓存失败 failed=%s", failed)
     return removed
 
 
