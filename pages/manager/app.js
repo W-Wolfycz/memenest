@@ -608,8 +608,11 @@ function openModal(title, body) {
     </div>
     <div class="modal-body">${body}</div>`;
   $("modal").hidden = false;
-  const first = panel.querySelector(".modal-body input, .modal-body textarea, .modal-body select");
-  if (first) first.focus();
+  // 刻意不自动 focus 第一个输入框：弹层大多数时候是「看内容」而不是「改内容」，
+  // 手机上自动 focus 会立刻把键盘顶起来，读一眼就得先收键盘。
+  // 想聚焦的弹层自己在 body 里给 data-autofocus，明确表达意图（目前没有）。
+  const wantsFocus = panel.querySelector(".modal-body [data-autofocus]");
+  if (wantsFocus) wantsFocus.focus();
 }
 
 
